@@ -1,0 +1,1848 @@
+#!/usr/bin/env bun
+// Cross-platform Claude Code status line. Run via: bun statusline-command.js
+import { spawnSync } from "node:child_process";
+import {
+  closeSync,
+  existsSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readSync,
+  statSync,
+} from "node:fs";
+import { basename as pathBasename, join, relative } from "node:path";
+import { homedir, release, hostname, userInfo } from "node:os";
+
+const esc = "\x1b";
+const GREEN = `${esc}[32m`;
+const YELLOW = `${esc}[33m`;
+const RED = `${esc}[31m`;
+const BRICK = `${esc}[38;5;196m`; // iconic LEGO red — for the plugins brick
+const MAGENTA = `${esc}[35m`;
+const BBLUE = `${esc}[94m`;
+const CYAN = `${esc}[36m`;
+const WHITE = `${esc}[97m`;
+const PINK = `${esc}[38;5;211m`;
+const PENCIL = `${esc}[38;5;220m`;
+const ORANGE = `${esc}[38;5;216m`;
+const SILVER = `${esc}[38;5;250m`;
+const BOLD = `${esc}[1m`;
+const ITALIC = `${esc}[3m`;
+const SOFT = `${esc}[38;5;245m`;
+const DIM = `${esc}[38;5;244m`; // (g/u/p) scope breakdown + doc notes — 244: dimmer than SOFT(245) but readable (240 was too dim)
+const VAL = `${esc}[97m`; // primary value text — neutral/bright (one knob) so threshold & semantic
+// colors (usage %, $/h, +/-, git counts, todo, vim) stand out instead of competing with a rainbow.
+const TRACK = `${esc}[48;5;236m`; // empty-bar track — a clearly DARK, uniform container (same at 0% or 60%)
+const BARLO = `${esc}[38;5;246m`;
+const RESET = `${esc}[0m`;
+const c256 = (n) => `${esc}[38;5;${n}m`; // 256-color foreground helper (config-row icon colors)
+
+// Nerd Font glyphs only. Use fromCodePoint for symbols above U+FFFF.
+const cp = (n) => String.fromCodePoint(n);
+const gModel = cp(0xf06a9); // nf-md-robot
+const gEffort = cp(0xf0e7); // nf-fa-bolt
+const gCtx = cp(0xe28c); // nf-fae-brain
+const gCost = cp(0xf0d6); // nf-fa-money
+const gClock = cp(0xf0150); // nf-md-clock
+const gDuration = cp(0xf252); // nf-fa-hourglass_half
+const gDir = cp(0xf07c); // nf-fa-folder_open
+const gTree = cp(0xe5fb); // nf-custom-folder_git_branch
+const gBranch = cp(0xf126); // nf-fa-code_branch
+const gPR = cp(0xf407); // nf-oct-git_pull_request — current-branch PR badge (if blank in your font, try an MD pull glyph, e.g. nf-md-source_pull)
+const gLines = cp(0xeb7e); // nf-cod-edit
+const gKey = cp(0xf084); // nf-fa-key
+const gTools = cp(0xf013); // nf-fa-gear
+const gAgent = cp(0xf06a9); // nf-md-robot
+const gUser = cp(0xf007); // nf-fa-user
+const gTodo = cp(0xf14a); // nf-fa-check_square
+const gCache = cp(0xf1c0); // nf-fa-database
+const gTokens = cp(0xf080); // nf-fa-bar_chart
+const gSpeed = cp(0xf0e7); // nf-fa-bolt
+const gApi = cp(0xf2f2); // nf-fa-stopwatch — API time
+const gStyle = cp(0xf1fc); // nf-fa-paint_brush
+const gVersion = cp(0xf121); // nf-fa-code
+const gWin = cp(0xf05b3); // nf-md-microsoft_windows
+const gApple = cp(0xf0035); // nf-md-apple
+const gLinux = cp(0xf17c); // nf-fa-linux (Tux) — only ever renders on Linux, so the Win-font FA-tofu gotcha doesn't apply here
+const gPerson = cp(0xf0004); // nf-md-account (MD — the FA user glyph is tofu in the Windows font)
+const gVim = cp(0xe62b); // nf-dev-vim
+const gCommand = cp(0xf120); // nf-fa-terminal
+const gPeak = cp(0xf185); // nf-fa-sun_o
+const gOffPeak = cp(0xf186); // nf-fa-moon_o
+const gConfig = cp(0xf085); // nf-fa-gears
+const gTag = cp(0xf02b); // nf-fa-tag
+const gPaper = cp(0xf0f6); // nf-fa-file_text_o (docs)
+const gCheck = cp(0xf00c); // nf-fa-check
+const gX = cp(0xf00d); // nf-fa-times
+const gAhead = cp(0xf062); // nf-fa-arrow_up
+const gBehind = cp(0xf063); // nf-fa-arrow_down
+const gIn = cp(0xf090); // nf-fa-sign_in (input tokens)
+const gOut = cp(0xf08b); // nf-fa-sign_out (output tokens)
+const gWrite = cp(0xf0ee); // nf-fa-cloud_upload (cache write)
+const gRead = cp(0xf0ed); // nf-fa-cloud_download (cache read)
+// Config-row icons — ALL Material Design (nf-md-*); Font Awesome renders blank in this font.
+const gCfgDoc = cp(0xf0219); // nf-md-file_document — CLAUDE.md/AGENTS.md (paired with a C/A letter)
+const gCfgAgents = cp(0xf167a); // nf-md-robot_outline
+const gCfgCmds = cp(0xf018d); // nf-md-console
+const gCfgSkills = cp(0xf0068); // nf-md-auto_fix (magic wand)
+const gCfgRules = cp(0xf0565); // nf-md-shield_check
+const gCfgMcp = cp(0xf048b); // nf-md-server
+const gCfgHooks = cp(0xf06e2); // nf-md-hook
+const gCfgPlugins = cp(0xf1288); // nf-md-toy_brick (LEGO)
+const gCfgConn = cp(0xf015f); // nf-md-cloud — claude.ai connectors
+const gCfgDirs = cp(0xf0257); // nf-md-folder_plus
+const gCfgChrome = cp(0xf268); // nf-fa-chrome — claude-in-chrome (FA exception in this MD row; if it renders blank use nf-md-google_chrome 0xf02af)
+const gOk = cp(0x2714) + cp(0xfe0e); // ✔︎ heavy check + U+FE0E text-presentation selector (forces glyph, never emoji)
+const gNo = cp(0x2718) + cp(0xfe0e); // ✘︎ heavy ballot X + text-presentation selector
+const FULL = "█";
+
+const HOME = homedir();
+const TRANSCRIPT_BYTES = readPositiveInt(process.env.CLAUDE_STATUSLINE_TRANSCRIPT_BYTES, 1024 * 1024);
+
+function readPositiveInt(value, fallback) {
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+}
+
+// Fill color: gray (BARLO) when low → yellow ≥70 → red ≥90 (original scheme). The track was
+// darkened to 236 so the gray fill keeps clear contrast against it without needing a fill hue.
+function usageColor(p) {
+  return p >= 90 ? RED : p >= 70 ? YELLOW : BARLO;
+}
+
+// Context fills differently from rate-limit usage: chat quality starts degrading around 50%, and
+// with auto-compact OFF nearing the window limit is a hard wall — so warn EARLIER than usageColor:
+// yellow ≥50% (degradation onset), red ≥80% (deep / near the wall). vs usage's 70/90.
+function contextColor(p) {
+  return p >= 80 ? RED : p >= 50 ? YELLOW : BARLO;
+}
+
+function makeBar(pct, width = 10, colorCode = "") {
+  pct = Math.max(0, Math.min(100, pct));
+  const eighths = Math.round((pct / 100) * width * 8);
+  const full = Math.floor(eighths / 8);
+  const rem = eighths % 8;
+  let bar = FULL.repeat(full);
+  let used = full;
+
+  if (rem > 0) {
+    bar += String.fromCodePoint(0x2590 - rem); // partials: ▏▎▍▌▋▊▉
+    used++;
+  }
+
+  bar += " ".repeat(Math.max(0, width - used));
+  return `${TRACK}${colorCode}${bar}${RESET}`;
+}
+
+function formatResetTime(ts, fmt = "HH:mm") {
+  if (ts === null || ts === undefined || ts === "") return "";
+
+  try {
+    let d;
+    const s = String(ts).trim();
+    if (/^\d+(\.\d+)?$/.test(s)) {
+      const n = Number(s);
+      d = new Date(n > 1e12 ? n : n * 1000);
+    } else {
+      d = new Date(ts);
+    }
+
+    if (Number.isNaN(d.getTime())) return "";
+
+    const pad = (n) => String(n).padStart(2, "0");
+    const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
+    if (fmt === "ddd HH:mm") return `${wd} ${hm}`;
+    // "auto": time only, but prepend the weekday when the reset falls on a DIFFERENT calendar
+    // day than now (e.g. a 5h window that rolls past midnight → "Tue 01:00" instead of "01:00").
+    if (fmt === "auto") {
+      const now = new Date();
+      const sameDay =
+        d.getFullYear() === now.getFullYear() &&
+        d.getMonth() === now.getMonth() &&
+        d.getDate() === now.getDate();
+      return sameDay ? hm : `${wd} ${hm}`;
+    }
+    return hm;
+  } catch {
+    return "";
+  }
+}
+
+function formatCountdown(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "0m";
+  const totalMinutes = Math.floor(ms / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return `${days}d${hours}h`;
+  if (hours > 0) return `${hours}h${minutes}m`;
+  return `${minutes}m`;
+}
+
+function formatDuration(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return "0m";
+  const totalMinutes = Math.floor(ms / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours > 0 && minutes > 0) return `${hours}h${minutes}m`;
+  if (hours > 0) return `${hours}h`;
+  return `${minutes}m`;
+}
+
+function formatTokens(tokens) {
+  const n = Number(tokens) || 0;
+  if (n >= 1_000_000) {
+    const v = n / 1_000_000;
+    return v >= 10 ? `${Math.round(v)}M` : `${v.toFixed(1)}M`;
+  }
+  if (n >= 1_000) {
+    const v = n / 1_000;
+    return v >= 10 ? `${Math.round(v)}K` : `${v.toFixed(1)}K`;
+  }
+  return String(Math.round(n));
+}
+
+function formatCost(cost) {
+  const n = Number(cost) || 0;
+  return `$${n.toFixed(2)}`;
+}
+
+function truncate(value, maxLen) {
+  const s = String(value || "").replace(/\s+/g, " ").trim();
+  return s.length <= maxLen ? s : `${s.slice(0, Math.max(0, maxLen - 3))}...`;
+}
+
+function percent(current, total) {
+  if (!Number.isFinite(current) || !Number.isFinite(total) || total <= 0) return 0;
+  return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
+}
+
+function readJson(filePath) {
+  try {
+    return JSON.parse(readFileSync(filePath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function readTail(filePath, maxBytes) {
+  try {
+    const st = statSync(filePath);
+    if (st.size <= maxBytes) return readFileSync(filePath, "utf8");
+
+    const fd = openSync(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(maxBytes);
+      readSync(fd, buffer, 0, maxBytes, st.size - maxBytes);
+      return buffer.toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+}
+
+function git(dir, args) {
+  const r = spawnSync("git", ["-C", dir, "--no-optional-locks", ...args], { encoding: "utf8" });
+  if (r.error || r.status !== 0) return null;
+  return r.stdout;
+}
+
+function gitStatus(dir) {
+  const out = git(dir, ["status", "--porcelain=v2", "--branch"]);
+  if (out === null) return null;
+
+  let branch = "";
+  let oid = "";
+  let ahead = 0;
+  let behind = 0;
+  let staged = 0;
+  let modified = 0;
+  let untracked = 0;
+  let conflicts = 0;
+
+  for (const line of out.split("\n")) {
+    if (!line) continue;
+    if (line.startsWith("# branch.head ")) branch = line.slice(14).trim();
+    else if (line.startsWith("# branch.oid ")) oid = line.slice(13).trim();
+    else if (line.startsWith("# branch.ab ")) {
+      const m = line.match(/\+(\d+)\s+-(\d+)/);
+      if (m) {
+        ahead = Number(m[1]) || 0;
+        behind = Number(m[2]) || 0;
+      }
+    } else if (line[0] === "1" || line[0] === "2") {
+      const xy = line.split(" ")[1] || "..";
+      if (xy[0] !== ".") staged++;
+      if (xy[1] !== ".") modified++;
+    } else if (line[0] === "u") conflicts++;
+    else if (line[0] === "?") untracked++;
+  }
+
+  if (!branch || branch === "(detached)") {
+    branch = oid && oid !== "(initial)" ? oid.slice(0, 7) : "detached";
+  }
+
+  return { branch, ahead, behind, staged, modified, untracked, conflicts };
+}
+
+function latestTagStatus(dir) {
+  const tag = git(dir, ["describe", "--tags", "--abbrev=0", "--match", "v*", "HEAD"])?.trim();
+  if (!tag) return null;
+
+  const count = Number(git(dir, ["rev-list", "--count", `${tag}..HEAD`])?.trim()) || 0;
+  return { tag, count };
+}
+
+function basename(p) {
+  if (!p) return "";
+  return pathBasename(String(p).replace(/[\\/]+$/, "")) || p;
+}
+
+function displayRelative(root, currentDir) {
+  if (!root || !currentDir || root === currentDir) return "";
+  const rel = relative(root, currentDir);
+  if (!rel || rel.startsWith("..") || /^[a-zA-Z]:/.test(rel)) return "";
+  return rel.replace(/\\/g, "/");
+}
+
+// The Info. row's CWD: the LITERAL current dir, home-relativized to ~/… with forward slashes. Unlike
+// the Repo headline (which is the project NAME), this always tracks exactly where you are.
+function homeRelative(dir) {
+  if (!dir) return "";
+  const d = String(dir).replace(/\\/g, "/").replace(/\/+$/, "");
+  const h = String(HOME).replace(/\\/g, "/").replace(/\/+$/, "");
+  if (d.toLowerCase() === h.toLowerCase()) return "~";
+  if (d.toLowerCase().startsWith(h.toLowerCase() + "/")) return "~/" + d.slice(h.length + 1);
+  return d;
+}
+
+// Middle-ellipsize a path so the LEAF (where you actually are) survives long paths — keeps the head
+// (~ or drive) and as many trailing segments as fit, dropping middle ones. We do this ourselves
+// because packSection truncates from the RIGHT, which would otherwise eat the leaf.
+function shortenPath(p, max = 40) {
+  if (!p || p.length <= max) return p;
+  const segs = p.split("/");
+  if (segs.length <= 2) {
+    const keep = Math.max(1, max - 1);
+    return p.slice(0, Math.ceil(keep / 2)) + "…" + p.slice(p.length - Math.floor(keep / 2));
+  }
+  const first = segs[0];
+  let tail = segs.slice(1);
+  while (tail.length > 1 && `${first}/…/${tail.join("/")}`.length > max) tail = tail.slice(1);
+  return `${first}/…/${tail.join("/")}`;
+}
+
+function countFiles(dir, pattern) {
+  try {
+    const files = readdirSync(dir);
+    return pattern ? files.filter((f) => pattern.test(f)).length : files.length;
+  } catch {
+    return 0;
+  }
+}
+
+// Entry names in a dir (filtered by `pattern`, with `strip` removed from each); [] if missing.
+function listEntryNames(dir, { pattern, strip } = {}) {
+  let names;
+  try {
+    names = readdirSync(dir);
+  } catch {
+    return [];
+  }
+  if (pattern) names = names.filter((f) => pattern.test(f));
+  return strip ? names.map((f) => f.replace(strip, "")) : names;
+}
+
+// Count *.md files recursively under a dir (0 if missing). Used for config dirs Claude Code
+// discovers recursively (agents, rules) where nested subdirs are organizational, not separate.
+function countMdRecursive(dir) {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  let n = 0;
+  for (const e of entries) {
+    if (e.isDirectory()) n += countMdRecursive(join(dir, e.name));
+    else if (/\.md$/i.test(e.name)) n++;
+  }
+  return n;
+}
+
+// Enterprise/managed config dir — cross-platform. Claude Code reads org-managed settings, MCP,
+// and CLAUDE.md from here (docs: code.claude.com/docs/en/settings#settings-files).
+//   win32: C:\Program Files\ClaudeCode   darwin: /Library/Application Support/ClaudeCode
+//   linux/WSL/other: /etc/claude-code
+// (We don't probe the Windows registry policy path HKLM/HKCU\SOFTWARE\Policies\ClaudeCode — that
+// needs a `reg query` subprocess on every render; the file-based deployment is the common case.)
+function managedDir() {
+  if (process.env.CLAUDE_STATUSLINE_MANAGED_DIR) return process.env.CLAUDE_STATUSLINE_MANAGED_DIR; // test/relocate override
+  if (process.platform === "win32") return "C:\\Program Files\\ClaudeCode";
+  if (process.platform === "darwin") return "/Library/Application Support/ClaudeCode";
+  return "/etc/claude-code";
+}
+// Windows registry managed policy: HKLM (admin) or HKCU (user) \SOFTWARE\Policies\ClaudeCode, a
+// `Settings` value (REG_SZ/REG_EXPAND_SZ) holding a JSON blob with the SAME schema as
+// managed-settings.json (hooks, mcpServers, claudeMd, …). One `reg query` per hive — only runs
+// inside the cached configCounts compute, never on every render. Returns the parsed object or null.
+function readRegManaged() {
+  if (process.platform !== "win32") return null;
+  for (const hive of ["HKLM", "HKCU"]) {
+    try {
+      const r = spawnSync("reg", ["query", `${hive}\\SOFTWARE\\Policies\\ClaudeCode`, "/v", "Settings"], {
+        encoding: "utf8",
+      });
+      if (r.error || r.status !== 0 || !r.stdout) continue;
+      const m = r.stdout.match(/\bSettings\b\s+REG_(?:SZ|EXPAND_SZ)\s+(.*)/);
+      if (m) {
+        const obj = JSON.parse(m[1].trim());
+        if (obj && typeof obj === "object") return obj; // HKLM wins over HKCU
+      }
+    } catch {}
+  }
+  return null;
+}
+// Enterprise/managed config, resolved to OBJECTS so hooks/mcp/claudeMd can be counted from either
+// the file-based deployment (managedDir) or the Windows registry policy (registry wins, per docs).
+function detectManaged() {
+  const dir = managedDir();
+  const settings = readRegManaged() || readJson(join(dir, "managed-settings.json")) || null;
+  const mcpServers = { ...(readJson(join(dir, "managed-mcp.json"))?.mcpServers || {}), ...(settings?.mcpServers || {}) };
+  const claudeMd = existsSync(join(dir, "CLAUDE.md")) || !!settings?.claudeMd;
+  return { dir, settings, mcpServers, claudeMd };
+}
+
+function fileExists(filePath) {
+  try {
+    return existsSync(filePath);
+  } catch {
+    return false;
+  }
+}
+
+// Config counts are broken down by Claude Code's ACTUAL config scopes (the docs renamed the old
+// names: "global"→"user", old "project"→"local"). Order shown broad→narrow:
+//   m = MANAGED  enterprise config under managedDir() — shown only when present on the machine
+//   u = USER     ~/.claude/… (loads in every project)
+//   p = PROJECT  committed/shared in the repo (.claude/…, .mcp.json, CLAUDE.md)
+//   l = LOCAL    your uncommitted per-project overrides (.claude/settings.local.json,
+//                ~/.claude.json projects[cwd], CLAUDE.local.md)
+// Items return whichever of {m,u,p,l} they support; the render marks slots an item type CANNOT
+// have "-" (truly N/A) and shows a count (0 if none) for the scopes it CAN.
+//
+// MCP servers (docs: code.claude.com/docs/en/mcp#mcp-installation-scopes), de-duped by precedence
+// Local > Project > User so a server defined in several places is counted once:
+//   u = ~/.claude.json top-level mcpServers · p = repo .mcp.json · l = ~/.claude.json projects[cwd]
+//   m = managedDir()/managed-mcp.json
+function mcpBreakdown(projectDir, currentDir, managed, state) {
+  const cj = readJson(join(HOME, ".claude.json"));
+  const user = new Set();
+  const local = new Set();
+  const project = new Set();
+  const norm = (s) => String(s || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  // user/local servers are ON unless toggled off (disabledMcpServers) or pending auth (needsAuth).
+  const addOn = (set, obj) => {
+    if (obj && typeof obj === "object")
+      for (const k of Object.keys(obj)) if (!state.disabled.has(k) && !state.needsAuth.has(k)) set.add(k);
+  };
+  addOn(user, cj?.mcpServers); // USER scope = ~/.claude.json top-level (all projects)
+  addOn(user, readJson(join(HOME, ".config", "claude-code", "mcp.json"))?.mcpServers);
+  if (cj?.projects && typeof cj.projects === "object") {
+    const wanted = new Set([norm(projectDir), norm(currentDir)].filter(Boolean));
+    for (const key of Object.keys(cj.projects)) {
+      if (wanted.has(norm(key))) addOn(local, cj.projects[key]?.mcpServers); // LOCAL = this project's entry
+    }
+  }
+  // PROJECT (.mcp.json) servers count only once APPROVED (enableAll or in enabledMcpjsonServers) and
+  // not disabled/rejected — a "pending approval" server isn't running, so it doesn't affect the chat.
+  if (projectDir) {
+    const pj = readJson(join(projectDir, ".mcp.json"))?.mcpServers;
+    if (pj && typeof pj === "object")
+      for (const k of Object.keys(pj))
+        if (
+          (state.enableAll || state.approvedJson.has(k)) &&
+          !state.disabled.has(k) &&
+          !state.rejectedJson.has(k) &&
+          !state.needsAuth.has(k)
+        )
+          project.add(k);
+  }
+  // precedence Local > Project > User: count each server once, at its highest-precedence source.
+  for (const k of local) { project.delete(k); user.delete(k); }
+  for (const k of project) user.delete(k);
+  const m = Object.keys(managed?.mcpServers || {}).length; // managed-mcp.json + managed settings mcpServers
+  return { m, u: user.size, p: project.size, l: local.size };
+}
+
+// Hooks are REGISTERED in a `hooks` event-map (settings.json, a plugin's hooks/hooks.json, or a
+// managed/registry settings blob), NOT as files in a dir. Sum the hook commands in one such map.
+function countHookMap(hooks) {
+  if (!hooks || typeof hooks !== "object") return 0;
+  let n = 0;
+  for (const groups of Object.values(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const g of groups) n += Array.isArray(g?.hooks) ? g.hooks.length : 1;
+  }
+  return n;
+}
+function hookCountInFile(filePath) {
+  return countHookMap(readJson(filePath)?.hooks);
+}
+
+// Hooks live in settings.json `hooks` maps, summed across the settings scopes (same precedence
+// chain as settings): m = managedDir()/managed-settings.json · u = ~/.claude/settings.json ·
+// p = repo .claude/settings.json · l = repo .claude/settings.local.json.
+function hooksBreakdown(projectDir, managed) {
+  return {
+    m: countHookMap(managed?.settings?.hooks), // managed-settings.json or registry policy blob
+    u: hookCountInFile(join(HOME, ".claude", "settings.json")),
+    p: projectDir ? hookCountInFile(join(projectDir, ".claude", "settings.json")) : 0,
+    l: projectDir ? hookCountInFile(join(projectDir, ".claude", "settings.local.json")) : 0,
+  };
+}
+
+// Dir-based config (agents/commands/rules): u = USER ~/.claude/<sub> (loads everywhere); p =
+// PROJECT repo .claude/<sub>. These have NO local or managed form, so the render marks those slots
+// "-". `recursive` counts *.md down nested subdirs (agents & rules load that way per the docs);
+// otherwise count immediate entries matching `pattern`. (Skills have their own merged helper below.)
+function dirBreakdown(projectDir, sub, { pattern, recursive = false } = {}) {
+  const count = recursive ? countMdRecursive : (d) => countFiles(d, pattern);
+  return {
+    u: count(join(HOME, ".claude", sub)),
+    p: projectDir ? count(join(projectDir, ".claude", sub)) : 0,
+    l: 0,
+  };
+}
+
+// Skills now subsume output-styles (styles are migrating to skills:
+// https://support.claude.com/en/articles/10181068-styles-are-moving-to-skills). Per scope, union
+// skill-subdir names with output-style basenames so a style already reimplemented as a same-named
+// skill is counted once. x (plugin) skills come from enabled plugins; styles have no plugin form,
+// so x is just the plugin skill count.
+function skillsBreakdown(projectDir, pluginSkills) {
+  const namesAt = (root) =>
+    new Set([
+      ...listEntryNames(join(root, "skills")), // each skill = a subdir
+      ...listEntryNames(join(root, "output-styles"), { pattern: /\.md$/i, strip: /\.md$/i }),
+    ]);
+  return {
+    u: namesAt(join(HOME, ".claude")).size,
+    p: projectDir ? namesAt(join(projectDir, ".claude")).size : 0,
+    l: 0,
+    x: pluginSkills,
+  };
+}
+
+// Enabled plugin BASE names (`true` entries) in an enabledPlugins map, with the @marketplace
+// suffix stripped so the same plugin enabled from two marketplaces counts once.
+function enabledPluginNamesFromMap(ep) {
+  if (!ep || typeof ep !== "object") return [];
+  return Object.entries(ep)
+    .filter(([, v]) => v === true)
+    .map(([k]) => k.split("@")[0]);
+}
+// Same, read from one settings.json file on disk.
+function pluginEnabledNames(settingsPath) {
+  return enabledPluginNamesFromMap(readJson(settingsPath)?.enabledPlugins);
+}
+
+// Plugins enabled across the settings scopes, de-duped by base name (counted once, attributed to
+// the broadest scope): m = MANAGED enabledPlugins (enterprise settings can force-enable plugins) ·
+// u = USER ~/.claude/settings.json (not already managed) · p = PROJECT repo settings.json (not
+// already managed/user) · l = LOCAL repo settings.local.json (not already managed/user/project).
+function pluginsBreakdown(projectDir, trusted, managed) {
+  const m = new Set(enabledPluginNamesFromMap(managed?.settings?.enabledPlugins));
+  const u = new Set();
+  for (const n of pluginEnabledNames(join(HOME, ".claude", "settings.json"))) if (!m.has(n)) u.add(n);
+  const p = new Set();
+  const l = new Set();
+  if (projectDir && trusted) { // project/local enablement only takes effect once the workspace is trusted
+    for (const n of pluginEnabledNames(join(projectDir, ".claude", "settings.json")))
+      if (!m.has(n) && !u.has(n)) p.add(n);
+    for (const n of pluginEnabledNames(join(projectDir, ".claude", "settings.local.json")))
+      if (!m.has(n) && !u.has(n) && !p.has(n)) l.add(n);
+  }
+  return { m: m.size, u: u.size, p: p.size, l: l.size };
+}
+
+// Effective ENABLED plugin keys (`name@marketplace`), merged across settings scopes with
+// precedence user < project < local (later layers override), keeping only finally-true entries.
+// `trusted`: project/local enabledPlugins only TAKE EFFECT in a trusted workspace (settings from
+// an untrusted project don't load), so when untrusted we consider ONLY user-scope enablement.
+function pluginEnabledKeys(projectDir, trusted) {
+  const merged = {};
+  const layer = (path) => {
+    const ep = readJson(path)?.enabledPlugins;
+    if (ep && typeof ep === "object") Object.assign(merged, ep);
+  };
+  layer(join(HOME, ".claude", "settings.json")); // user (lowest precedence) — always loads
+  if (projectDir && trusted) {
+    layer(join(projectDir, ".claude", "settings.json")); // project
+    layer(join(projectDir, ".claude", "settings.local.json")); // local (highest)
+  }
+  return Object.keys(merged).filter((k) => merged[k] === true);
+}
+
+// Resolve an enabled plugin key to its on-disk root via ~/.claude/plugins/installed_plugins.json
+// (each record carries the exact installPath incl. the version dir). Prefer the copy flagged
+// `.in_use`; else the most recently installed record. Cross-platform: paths come straight from CC.
+function pluginInstallPath(key, installed) {
+  const recs = installed?.plugins?.[key];
+  if (!Array.isArray(recs) || !recs.length) return null;
+  for (const r of recs) if (r?.installPath && existsSync(join(r.installPath, ".in_use"))) return r.installPath;
+  return recs[recs.length - 1]?.installPath || recs[0]?.installPath || null;
+}
+
+// Components an ENABLED plugin bundles, summed across all enabled plugins (de-duped by base name so
+// a plugin enabled from two marketplaces counts once). This is the "plugin" (x) scope — the lowest-
+// precedence source for agents/commands/skills/hooks/MCP (docs: plugins-reference component dirs).
+function pluginComponentCounts(projectDir, trusted, disabled, needsAuth) {
+  const out = { agents: 0, commands: 0, skills: 0, hooks: 0, mcps: 0 };
+  const installed = readJson(join(HOME, ".claude", "plugins", "installed_plugins.json"));
+  const seen = new Set();
+  for (const key of pluginEnabledKeys(projectDir, trusted)) {
+    const base = key.split("@")[0];
+    if (seen.has(base)) continue;
+    const root = pluginInstallPath(key, installed);
+    if (!root || !existsSync(root)) continue;
+    seen.add(base);
+    const manifest = readJson(join(root, ".claude-plugin", "plugin.json")) || {};
+    out.agents += countMdRecursive(join(root, "agents"));
+    out.commands += countMdRecursive(join(root, "commands"));
+    out.skills += countFiles(join(root, "skills")); // each skill = a subdir
+    out.hooks += countHookMap(readJson(join(root, "hooks", "hooks.json"))?.hooks) + countHookMap(manifest.hooks);
+    // plugin MCP servers are identified as "plugin:<base>:<server>" in disabledMcpServers — skip the off ones.
+    // NOTE: a plugin .mcp.json declares servers at the TOP LEVEL ({ "<name>": {...} }), NOT wrapped in
+    // `mcpServers` like a project .mcp.json. Accept either form (prefer the wrapper when present).
+    const mcpFile = readJson(join(root, ".mcp.json")) || {};
+    const fileServers = mcpFile.mcpServers && typeof mcpFile.mcpServers === "object" ? mcpFile.mcpServers : mcpFile;
+    const servers = { ...fileServers, ...(manifest.mcpServers || {}) };
+    for (const s of Object.keys(servers))
+      if (!disabled.has(`plugin:${base}:${s}`) && !needsAuth.has(`plugin:${base}:${s}`)) out.mcps++;
+  }
+  return out;
+}
+
+// claude.ai account connectors (Slack/Jira/etc.) — remote, account-level (tied to your login), not
+// in any local/project config. Local trace: ~/.claude.json `claudeAiMcpEverConnected` (names that
+// have ever connected); we drop any currently in mcp-needs-auth-cache.json. NO managed-vs-user
+// provenance is exposed on disk (researched: oauthAccount carries your org role, not per-connector
+// source), so this is a single flat count — no m/u/p/l/x breakdown is possible.
+function connectorsBreakdown() {
+  const arr = readJson(join(HOME, ".claude.json"))?.claudeAiMcpEverConnected;
+  if (!Array.isArray(arr)) return { u: 0 };
+  const needsAuth = readJson(join(HOME, ".claude", "mcp-needs-auth-cache.json")) || {};
+  return { u: arr.filter((name) => !(name in needsAuth)).length };
+}
+
+// A workspace's PROJECT/LOCAL executable config only loads once you've accepted its trust dialog;
+// CC records that as `hasTrustDialogAccepted` on the project entry in ~/.claude.json. Pass several
+// candidate dirs (cwd, project root, AND the MAIN repo root) — a linked worktree lives under
+// `<main>/.claude/worktrees/<wt>` and isn't its own project entry, so it inherits the main repo's
+// trust. Untrusted → executable project/local scopes are zeroed. (User/managed not trust-gated.)
+function isWorkspaceTrusted(dirs) {
+  const projects = readJson(join(HOME, ".claude.json"))?.projects;
+  if (!projects || typeof projects !== "object") return false;
+  const norm = (s) => String(s || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const wanted = new Set(dirs.filter(Boolean).map(norm));
+  for (const [k, v] of Object.entries(projects)) {
+    if (wanted.has(norm(k)) && v?.hasTrustDialogAccepted === true) return true;
+  }
+  return false;
+}
+
+// Per-server MCP enable/approval state from the active workspace's ~/.claude.json project entry
+// (worktrees fall back to the main repo). Drives "only count MCP that's actually ON":
+//   disabledMcpServers      — servers toggled OFF in /mcp (plain name, or "plugin:<plugin>:<srv>")
+//   enabledMcpjsonServers   — project (.mcp.json) servers you APPROVED
+//   disabledMcpjsonServers  — project servers you REJECTED
+//   enableAllProjectMcpServers — approve every project server
+// (Live connection failures aren't recorded on disk, so "configured+approved" is the best proxy
+// for "running" we can read.)
+function mcpServerState(dirs) {
+  const projects = readJson(join(HOME, ".claude.json"))?.projects || {};
+  const norm = (s) => String(s || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const want = dirs.filter(Boolean).map(norm);
+  let entry = null;
+  for (const w of want) {
+    for (const [k, v] of Object.entries(projects)) if (norm(k) === w) { entry = v; break; }
+    if (entry) break;
+  }
+  const arr = (x) => (Array.isArray(x) ? x : []);
+  // Servers pending OAuth (401/403), keyed by name or "plugin:<plugin>:<srv>" — not usable, so
+  // excluded from counts (same spirit as disabled). The only on-disk "currently broken" signal.
+  const needsAuth = new Set(Object.keys(readJson(join(HOME, ".claude", "mcp-needs-auth-cache.json")) || {}));
+  return {
+    disabled: new Set(arr(entry?.disabledMcpServers)),
+    needsAuth,
+    approvedJson: new Set(arr(entry?.enabledMcpjsonServers)),
+    rejectedJson: new Set(arr(entry?.disabledMcpjsonServers)),
+    enableAll: entry?.enableAllProjectMcpServers === true,
+  };
+}
+
+function statMtime(p) {
+  try {
+    return statSync(p).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
+function hashPath(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
+// Memoize a slow, rarely-changing result to a temp file keyed by the mtimes of sigPaths
+// (+ an extra signature). Avoids re-parsing big files (e.g. ~/.claude.json) on every render.
+// THIS script's own mtime (Bun.main) is folded into the key so editing the statusline busts the
+// cache — otherwise a newly-added computed field reads stale until a watched config file changes.
+function cachedByMtime(key, sigPaths, extraSig, compute) {
+  const sig = sigPaths.map(statMtime).join(":") + "|" + String(extraSig) + "|" + statMtime(Bun.main);
+  const file = (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/") + "/sl-cache-" + key + ".json";
+  const prev = readJson(file);
+  if (prev && prev.sig === sig) return prev.val ?? null;
+  const val = compute();
+  try {
+    require("node:fs").writeFileSync(file, JSON.stringify({ sig, val }));
+  } catch {}
+  return val;
+}
+
+// Each entry is a per-scope {m,u,p,l} breakdown (see the scope helpers above for what each means).
+function configCounts(projectDir, addedDirs, currentDir, mainRoot) {
+  if (!projectDir) return null;
+  const managed = detectManaged();
+  // PROJECT/LOCAL scope reads from `projDir` (the project root). If that root IS the user's home
+  // dir, its `.claude/` is literally `~/.claude/` — the USER scope — so reading it again as
+  // project/local would DOUBLE-COUNT user config (happens when Claude is launched directly in ~,
+  // outside any repo). Treat home as "no project": project/local then correctly resolve to 0.
+  // We only ever read ONE project root (the git toplevel, or cwd if non-git) — never a parent
+  // container's or sibling/child repos' `.claude/`, so a dir like ~/Repos can't pull in sub-repos.
+  const norm = (s) => String(s || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  const projDir = norm(projectDir) === norm(HOME) ? null : projectDir;
+  // Trust gate (docs: untrusted workspace blocks all EXECUTABLE project/local config until you
+  // accept its trust dialog). Untrusted → project/local hooks, MCP, agents, commands, skills, and
+  // project/local-enabled plugins do NOT load. CONTENT config still loads (CLAUDE.md, rules) so
+  // those are NOT gated. (Output-styles now count under skills, which IS gated.) User/managed
+  // scopes are never trust-gated.
+  const trusted = !projDir || isWorkspaceTrusted([currentDir, projDir, mainRoot]); // mainRoot → worktrees inherit trust
+  const mcpState = mcpServerState([currentDir, projDir, mainRoot]); // per-server enable/approval (worktree → main)
+  const plug = pluginComponentCounts(projDir, trusted, mcpState.disabled, mcpState.needsAuth); // ENABLED-plugin components (x scope)
+  const withX = (b, x) => ({ ...b, x }); // attach the plugin-scope count to a breakdown
+  // Whole-repo recursive count of a named doc via git (tracked + untracked-non-ignored, so
+  // node_modules/.git/etc. are skipped). Root + any nested copy. 0 outside a repo. Project scope.
+  const docCount = (name) => {
+    if (!projDir) return 0;
+    const out = git(projDir, ["ls-files", "--cached", "--others", "--exclude-standard", name, `*/${name}`]);
+    if (out === null) return 0;
+    return out.split("\n").filter((l) => l.trim() !== "").length;
+  };
+  // CLAUDE.md memory files, counted per scope (each is a distinct file that loads into context):
+  // m = managed (<managedDir>/CLAUDE.md or the `claudeMd` key in managed settings/registry) ·
+  // u = user (~/.claude/CLAUDE.md) · p = repo recursive committed count · l = CLAUDE.local.md.
+  // Summed + shown like every other widget. AGENTS.md is NOT counted: Claude Code reads CLAUDE.md
+  // only — AGENTS.md loads solely if a CLAUDE.md @-imports it.
+  const claudeMd = () => ({
+    m: managed.claudeMd ? 1 : 0,
+    u: existsSync(join(HOME, ".claude", "CLAUDE.md")) ? 1 : 0,
+    p: docCount("CLAUDE.md"),
+    l: projDir && existsSync(join(projDir, "CLAUDE.local.md")) ? 1 : 0,
+  });
+  // Build the EXECUTABLE project/local-bearing breakdowns, then zero their project/local slots when
+  // untrusted (they don't load). CONTENT items (rules, styles, CLAUDE.md) are built un-gated below.
+  const hooks = withX(hooksBreakdown(projDir, managed), plug.hooks);
+  const mcps = withX(mcpBreakdown(projDir, currentDir, managed, mcpState), plug.mcps);
+  const agents = withX(dirBreakdown(projDir, "agents", { recursive: true }), plug.agents); // recursive
+  const commands = withX(dirBreakdown(projDir, "commands", { pattern: /\.md$/ }), plug.commands);
+  const skills = skillsBreakdown(projDir, plug.skills); // skills + output-styles, deduped by name
+  if (!trusted) {
+    hooks.p = hooks.l = 0; // hooks: project + local blocked
+    mcps.p = mcps.l = 0; // MCP: project + local blocked
+    agents.p = commands.p = skills.p = 0; // project agents/commands/skills not discovered (no local form)
+    // plugin (x) counts already exclude project/local-enabled plugins via plug (trust-aware);
+    // the plugins-widget p/l are gated inside pluginsBreakdown(projDir, trusted) below.
+  }
+  // claude-in-chrome (built-in browser MCP) counts as "enabled" only when the extension is installed,
+  // the feature toggle is on, AND onboarding is complete — all three readable locally. Live
+  // "connected" status is session-only, so this reflects ENABLED, not connected.
+  const cjr = readJson(join(HOME, ".claude.json")) || {};
+  const chromeEnabled =
+    cjr.cachedChromeExtensionInstalled === true &&
+    cjr.claudeInChromeDefaultEnabled === true &&
+    cjr.hasCompletedClaudeInChromeOnboarding === true;
+  return {
+    managed, // {dir, settings, mcpServers, claudeMd} — source objects the m-scope counts read from
+    chrome: chromeEnabled, // claude-in-chrome enabled (extension installed + toggle on + onboarded)
+    trusted, // false → executable project/local scopes zeroed (untrusted workspace)
+    claude: claudeMd(), // CONTENT — loads untrusted, not gated
+    agents,
+    commands,
+    skills,
+    rules: dirBreakdown(projDir, "rules", { recursive: true }), // CONTENT — loads untrusted, not gated
+    mcps,
+    hooks,
+    plugins: pluginsBreakdown(projDir, trusted, managed),
+    connectors: connectorsBreakdown(),
+    dirs: { l: Array.isArray(addedDirs) ? addedDirs.length : 0 }, // session-added dirs (local-ish)
+  };
+}
+
+const SLASH_COMMAND_TAG_RE = /<command-name>([^<]+)<\/command-name>/;
+
+function createTranscriptState() {
+  return {
+    toolUses: new Map(),
+    completedToolCount: 0,
+    totalToolCalls: 0,
+    lastTool: null,
+    runningToolIds: new Set(),
+    lastTodoWriteInput: null,
+    activeAgentIds: new Set(),
+    completedAgentCount: 0,
+    tasks: new Map(),
+    nextTaskId: 1,
+    pendingTaskCreates: new Map(),
+    pendingTaskUpdates: new Map(),
+    activeSlashCommand: null,
+    sessionName: null,
+    sessionStartTime: null,
+  };
+}
+
+function normalizeTaskStatus(status) {
+  switch (status) {
+    case "not_started":
+      return "pending";
+    case "running":
+      return "in_progress";
+    case "complete":
+    case "done":
+      return "completed";
+    default:
+      return status;
+  }
+}
+
+function processTranscriptEntry(entry, state) {
+  if (!state.sessionStartTime && entry.timestamp) {
+    const t = new Date(entry.timestamp).getTime();
+    if (Number.isFinite(t)) state.sessionStartTime = t;
+  }
+
+  if (entry.customTitle) state.sessionName = String(entry.customTitle);
+
+  if (entry.type === "assistant" && Array.isArray(entry.message?.content)) {
+    for (const block of entry.message.content) {
+      if (block.type !== "tool_use" || !block.id || !block.name) continue;
+
+      state.toolUses.set(block.id, {
+        name: block.name,
+        timestamp: entry.timestamp,
+        input: block.input,
+      });
+      state.runningToolIds.add(block.id);
+      state.totalToolCalls++;
+      state.lastTool = { name: block.name, input: block.input };
+
+      if (block.name === "Task") state.activeAgentIds.add(block.id);
+
+      if (block.name === "TaskCreate") {
+        const input = block.input || {};
+        if (input.subject) {
+          const seqId = String(state.nextTaskId++);
+          state.pendingTaskCreates.set(block.id, {
+            seqId,
+            subject: input.subject,
+            status: normalizeTaskStatus(input.status || "pending"),
+          });
+        }
+      } else if (block.name === "TaskUpdate") {
+        const input = block.input || {};
+        if (input.taskId) {
+          state.pendingTaskUpdates.set(block.id, {
+            taskId: input.taskId,
+            status: input.status,
+            subject: input.subject,
+          });
+        }
+      }
+    }
+  }
+
+  if (entry.type === "user" && entry.message?.content !== undefined) {
+    const content = entry.message.content;
+    let matchedName = null;
+    let hasText = false;
+
+    if (typeof content === "string") {
+      const m = content.match(SLASH_COMMAND_TAG_RE);
+      if (m) {
+        const name = m[1].trim();
+        if (name.startsWith("/")) {
+          matchedName = name;
+          hasText = true;
+        }
+      } else {
+        const trimmed = content.trim();
+        if (trimmed.length > 0 && !trimmed.startsWith("<")) hasText = true;
+      }
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (block.type !== "text" || typeof block.text !== "string") continue;
+        hasText = true;
+        const m = block.text.match(SLASH_COMMAND_TAG_RE);
+        if (m) {
+          const name = m[1].trim();
+          if (name.startsWith("/")) matchedName = name;
+          break;
+        }
+      }
+    }
+
+    if (hasText) {
+      state.activeSlashCommand = matchedName
+        ? { name: matchedName, startTime: entry.timestamp ? new Date(entry.timestamp).getTime() : Date.now() }
+        : null;
+    }
+  }
+
+  if (entry.type === "user" && Array.isArray(entry.message?.content)) {
+    for (const block of entry.message.content) {
+      if (block.type !== "tool_result" || !block.tool_use_id) continue;
+
+      state.completedToolCount++;
+      state.runningToolIds.delete(block.tool_use_id);
+
+      if (state.activeAgentIds.delete(block.tool_use_id)) state.completedAgentCount++;
+
+      const tool = state.toolUses.get(block.tool_use_id);
+      if (tool?.name === "TodoWrite") state.lastTodoWriteInput = tool.input;
+
+      const pendingCreate = state.pendingTaskCreates.get(block.tool_use_id);
+      if (pendingCreate) {
+        state.tasks.set(pendingCreate.seqId, {
+          subject: pendingCreate.subject,
+          status: pendingCreate.status,
+        });
+        state.pendingTaskCreates.delete(block.tool_use_id);
+      }
+
+      const pendingUpdate = state.pendingTaskUpdates.get(block.tool_use_id);
+      if (pendingUpdate) {
+        const task = state.tasks.get(pendingUpdate.taskId);
+        if (task) {
+          if (pendingUpdate.status) task.status = normalizeTaskStatus(pendingUpdate.status);
+          if (pendingUpdate.subject) task.subject = pendingUpdate.subject;
+        }
+        state.pendingTaskUpdates.delete(block.tool_use_id);
+      }
+
+      state.toolUses.delete(block.tool_use_id);
+    }
+  }
+}
+
+function parseTranscript(transcriptPath) {
+  if (!transcriptPath || !existsSync(transcriptPath)) return null;
+
+  const state = createTranscriptState();
+  const content = readTail(transcriptPath, TRANSCRIPT_BYTES);
+  for (const line of content.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      processTranscriptEntry(JSON.parse(line), state);
+    } catch {
+      // The first tail line can be partial; skip malformed JSONL.
+    }
+  }
+  return state;
+}
+
+// Cumulative session output-tokens + tool-calls, accumulated INCREMENTALLY across renders:
+// persist a byte offset + running totals and only parse NEW transcript bytes each render.
+// (stdin's total_output_tokens is current-context only — useless as a tok/s numerator.)
+function accumulateStats(transcriptPath, sessionId) {
+  if (!transcriptPath || !existsSync(transcriptPath)) return { outputTokens: 0, toolCalls: 0 };
+
+  let size;
+  try {
+    size = statSync(transcriptPath).size;
+  } catch {
+    return { outputTokens: 0, toolCalls: 0 };
+  }
+
+  const cacheFile =
+    (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/") +
+    "/sl-acc-" +
+    hashPath(String(sessionId || transcriptPath)) +
+    ".json";
+
+  let acc = readJson(cacheFile);
+  if (!acc || typeof acc.offset !== "number" || acc.offset > size) {
+    acc = { offset: 0, outputTokens: 0, toolCalls: 0 }; // first run, or file truncated/rotated
+  }
+  if (size <= acc.offset) return { outputTokens: acc.outputTokens, toolCalls: acc.toolCalls };
+
+  try {
+    const fd = openSync(transcriptPath, "r");
+    try {
+      const buf = Buffer.alloc(size - acc.offset);
+      readSync(fd, buf, 0, buf.length, acc.offset);
+      const text = buf.toString("utf8");
+      const lastNl = text.lastIndexOf("\n");
+      if (lastNl < 0) return { outputTokens: acc.outputTokens, toolCalls: acc.toolCalls };
+
+      const complete = text.slice(0, lastNl);
+      for (const line of complete.split("\n")) {
+        if (!line.trim()) continue;
+        try {
+          const e = JSON.parse(line);
+          if (e.type !== "assistant") continue;
+          acc.outputTokens += Number(e.message?.usage?.output_tokens) || 0;
+          if (Array.isArray(e.message?.content)) {
+            for (const b of e.message.content) if (b.type === "tool_use") acc.toolCalls++;
+          }
+        } catch {}
+      }
+      acc.offset += Buffer.byteLength(complete, "utf8") + 1; // +1 for the consumed newline
+      try {
+        require("node:fs").writeFileSync(cacheFile, JSON.stringify(acc));
+      } catch {}
+    } finally {
+      closeSync(fd);
+    }
+  } catch {}
+
+  return { outputTokens: acc.outputTokens, toolCalls: acc.toolCalls };
+}
+
+function extractToolTarget(name, input) {
+  if (!input || typeof input !== "object") return undefined;
+  switch (name) {
+    case "Read":
+    case "Write":
+    case "Edit":
+    case "MultiEdit":
+      return typeof input.file_path === "string" ? basename(input.file_path) : undefined;
+    case "Glob":
+    case "Grep":
+      return typeof input.pattern === "string" ? truncate(input.pattern, 20) : undefined;
+    case "Bash":
+      return typeof input.command === "string" ? truncate(input.command, 25) : undefined;
+    default:
+      return undefined;
+  }
+}
+
+function todoProgress(transcript) {
+  if (!transcript) return null;
+
+  if (transcript.tasks.size > 0) {
+    const tasks = [...transcript.tasks.values()];
+    const completed = tasks.filter((t) => t.status === "completed").length;
+    const current = tasks.find((t) => t.status === "in_progress" || t.status === "pending");
+    return {
+      current: current ? { content: current.subject, status: current.status } : undefined,
+      completed,
+      total: tasks.length,
+    };
+  }
+
+  const input = transcript.lastTodoWriteInput;
+  if (!input || typeof input !== "object" || !Array.isArray(input.todos)) return null;
+
+  const todos = input.todos;
+  const completed = todos.filter((t) => normalizeTaskStatus(t.status) === "completed").length;
+  const current = todos.find((t) => {
+    const s = normalizeTaskStatus(t.status);
+    return s === "in_progress" || s === "pending";
+  });
+
+  return {
+    current: current ? { content: current.content, status: normalizeTaskStatus(current.status) } : undefined,
+    completed,
+    total: todos.length,
+  };
+}
+
+function agentStatus(transcript) {
+  if (!transcript) return null;
+  const active = [];
+
+  for (const id of transcript.activeAgentIds) {
+    const tool = transcript.toolUses.get(id);
+    if (!tool) continue;
+    const input = tool.input || {};
+    active.push({
+      name: input.subagent_type || "Agent",
+      description: input.description,
+    });
+  }
+
+  if (active.length === 0 && transcript.completedAgentCount === 0) return null;
+  return { active, completed: transcript.completedAgentCount };
+}
+
+function pacificTime() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Los_Angeles",
+    hourCycle: "h23",
+    hour: "numeric",
+    minute: "numeric",
+    weekday: "short",
+  }).formatToParts(new Date());
+
+  const weekday = parts.find((p) => p.type === "weekday")?.value || "Sun";
+  const dayMap = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  return {
+    hour: Number(parts.find((p) => p.type === "hour")?.value) || 0,
+    minute: Number(parts.find((p) => p.type === "minute")?.value) || 0,
+    dayOfWeek: dayMap[weekday] ?? 0,
+  };
+}
+
+function peakStatus() {
+  const pt = pacificTime();
+  const isWeekday = pt.dayOfWeek >= 1 && pt.dayOfWeek <= 5;
+  const isPeak = isWeekday && pt.hour >= 5 && pt.hour < 11;
+  const currentMinutes = pt.hour * 60 + pt.minute;
+
+  let minutesToTransition;
+  if (isPeak) {
+    minutesToTransition = 11 * 60 - currentMinutes;
+  } else if (isWeekday && currentMinutes < 5 * 60) {
+    minutesToTransition = 5 * 60 - currentMinutes;
+  } else {
+    let daysUntilNextWeekday;
+    if (pt.dayOfWeek === 5) daysUntilNextWeekday = 3;
+    else if (pt.dayOfWeek === 6) daysUntilNextWeekday = 2;
+    else if (pt.dayOfWeek === 0) daysUntilNextWeekday = 1;
+    else daysUntilNextWeekday = 1;
+
+    minutesToTransition = (24 * 60 - currentMinutes) + (daysUntilNextWeekday - 1) * 24 * 60 + 5 * 60;
+  }
+
+  return { isPeak, minutesToTransition };
+}
+
+function defaultEffort(modelId, displayName) {
+  const s = `${modelId || ""} ${displayName || ""}`.toLowerCase();
+  if (s.includes("opus")) return "xhigh";
+  if (s.includes("sonnet")) return "medium";
+  return "high";
+}
+
+// Effort level, styled to echo Claude Code's /effort menu. The menu's xhigh shimmer and max rainbow
+// are ANIMATED; a 60s-refresh status line can't animate, so the higher tiers get a smooth static
+// TRUECOLOR (24-bit) gradient instead — the same kind of soft hue-blend CC uses for its own gradient
+// text, far classier than flat 256-color jumps: high = solid violet, xhigh = a violet→lavender→violet
+// sheen, max = a warm→cool coral→pink→violet→indigo sweep, ultra = a filled swatch chip.
+const rgbFg = (r, g, b) => `${esc}[38;2;${r};${g};${b}m`;
+const rgbBg = (r, g, b) => `${esc}[48;2;${r};${g};${b}m`;
+// Smooth per-character gradient across RGB stops. Short words sample fewer stops but stay smooth
+// because consecutive stops sit close in hue (no muddy midpoints). stops: array of [r,g,b].
+function gradientText(text, stops) {
+  const chars = [...text];
+  const seg = Math.max(1, stops.length - 1);
+  return (
+    chars
+      .map((ch, i) => {
+        const t = chars.length <= 1 ? 0 : i / (chars.length - 1);
+        const p = t * seg;
+        const k = Math.min(seg - 1, Math.floor(p));
+        const f = p - k;
+        const a = stops[k];
+        const b = stops[k + 1] || a;
+        const lerp = (j) => Math.round(a[j] + (b[j] - a[j]) * f);
+        return `${rgbFg(lerp(0), lerp(1), lerp(2))}${ch}`;
+      })
+      .join("") + RESET
+  );
+}
+const EFFORT_AMBER = [240, 176, 80];
+const EFFORT_GREEN = [122, 201, 132];
+const EFFORT_VIOLET = [167, 139, 250]; // Claude-ish violet (#A78BFA)
+const EFFORT_SHEEN = [EFFORT_VIOLET, [224, 208, 255], EFFORT_VIOLET]; // xhigh: violet→lavender→violet
+const EFFORT_GRADIENT = [
+  [240, 138, 110], // coral
+  [236, 107, 160], // pink
+  [214, 108, 190], // magenta
+  [168, 130, 226], // violet
+  [124, 142, 232], // indigo
+];
+function effortStyle(level) {
+  const text = String(level || "");
+  // Bolt stays a NEUTRAL gray anchor (never recolored per level) so the colored TEXT carries the
+  // meaning and contrasts with it. (Tweak SILVER → 252/97 for a whiter bolt.)
+  const bolt = `${SILVER}${gEffort}${RESET}`;
+  switch (text.toLowerCase()) {
+    case "low":
+      return `${bolt} ${rgbFg(...EFFORT_AMBER)}${text}${RESET}`;
+    case "medium":
+      return `${bolt} ${rgbFg(...EFFORT_GREEN)}${text}${RESET}`;
+    case "high":
+      return `${bolt} ${rgbFg(...EFFORT_VIOLET)}${text}${RESET}`;
+    case "xhigh": // violet sheen — the static nod to the menu's shimmer
+      return `${bolt} ${gradientText(text, EFFORT_SHEEN)}`;
+    case "max": // smooth warm→cool gradient — the static nod to the menu's rainbow cycle
+      return `${bolt} ${gradientText(text, EFFORT_GRADIENT)}`;
+    case "ultra":
+    case "ultracode": // selected-swatch chip: light lavender on a deep-violet block
+      return `${rgbBg(74, 58, 140)}${rgbFg(224, 208, 255)}${BOLD} ${gEffort} ${text} ${RESET}`;
+    default:
+      return `${bolt} ${VAL}${text}${RESET}`;
+  }
+}
+
+// OS badge: platform icon (true-to-brand color) + the REAL version, all via cheap reads (no
+// subprocess). win32: edition from build (os.release()) + the build number. darwin: ProductVersion
+// from the system plist. linux: ID + VERSION_ID from /etc/os-release (e.g. "Debian 12").
+function osBadge() {
+  const p = process.platform;
+  if (p === "win32") {
+    const build = Number(release().split(".")[2]) || 0; // os.release() = "10.0.26200"
+    return { icon: gWin, color: c256(39), label: `Win ${build >= 22000 ? "11" : "10"} (${build})` };
+  }
+  if (p === "darwin") {
+    let ver = "";
+    try {
+      const m = readFileSync("/System/Library/CoreServices/SystemVersion.plist", "utf8")
+        .match(/<key>ProductVersion<\/key>\s*<string>([^<]+)<\/string>/);
+      if (m) ver = m[1].trim();
+    } catch {}
+    if (!ver) ver = { 25: "26", 24: "15", 23: "14", 22: "13", 21: "12", 20: "11", 19: "10.15" }[Number(release().split(".")[0]) || 0] || "";
+    return { icon: gApple, color: WHITE, label: ver ? `macOS ${ver}` : "macOS" };
+  }
+  // linux / other — short "Name Version" from /etc/os-release (Debian 12, Ubuntu 22.04, …)
+  let label = "Linux";
+  try {
+    const txt = readFileSync("/etc/os-release", "utf8");
+    const field = (k) => (txt.match(new RegExp(`^${k}="?([^"\n]+)`, "m")) || [])[1];
+    const id = field("ID");
+    const verId = field("VERSION_ID");
+    if (id) {
+      const name = id.charAt(0).toUpperCase() + id.slice(1);
+      label = verId ? `${name} ${verId}` : name;
+    } else {
+      label = field("PRETTY_NAME") || "Linux";
+    }
+  } catch {}
+  return { icon: gLinux, color: c256(208), label };
+}
+
+function rlBlock(node, label, fmt) {
+  const pct = node?.used_percentage ?? node?.utilization;
+  if (pct === null || pct === undefined || pct === "") return null;
+  const p = Math.round(Number(pct));
+  if (!Number.isFinite(p)) return null;
+
+  const rt = formatResetTime(node.resets_at ?? node.reset_at, fmt);
+  // full = with bar; compact = no bar (packer falls back to this when the bar won't fit,
+  // so a gauge degrades gracefully instead of getting truncated with an ellipsis).
+  const full = `${SOFT}${label}${RESET} ${makeBar(p, 10, usageColor(p))} ${usageColor(p)}${p}%${RESET}${rt ? ` ${SOFT}${rt}${RESET}` : ""}`;
+  const compact = `${SOFT}${label}${RESET} ${usageColor(p)}${p}%${RESET}${rt ? ` ${SOFT}(${rt})${RESET}` : ""}`;
+  return [p, full, compact];
+}
+
+// Sonnet weekly limit lives only behind the OAuth usage API (not in stdin). Read the OAuth
+// token and fetch it, but cache the result with a TTL so we hit the API at most once per window.
+function readOauthToken() {
+  try {
+    if (process.platform === "darwin") {
+      const r = spawnSync("security", ["find-generic-password", "-s", "Claude Code-credentials", "-w"], { encoding: "utf8" });
+      if (!r.error && r.status === 0 && r.stdout) {
+        return JSON.parse(r.stdout.trim())?.claudeAiOauth?.accessToken ?? null;
+      }
+    }
+    return readJson(join(HOME, ".claude", ".credentials.json"))?.claudeAiOauth?.accessToken ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchSonnetUsage(ttlMs = 5 * 60 * 1000) {
+  const cacheFile = (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/") + "/sl-usage.json";
+  const prev = readJson(cacheFile);
+  if (prev && typeof prev.ts === "number" && Date.now() - prev.ts < ttlMs) return prev.data ?? null; // fresh
+
+  const token = readOauthToken();
+  if (!token) return prev?.data ?? null; // no token: nothing to fetch, keep any stale value
+
+  const url = "https://api.anthropic.com/api/oauth/usage";
+  const headers = {
+    Accept: "application/json",
+    Authorization: `Bearer ${token}`,
+    "anthropic-beta": "oauth-2025-04-20",
+    "User-Agent": "claude-statusline/1.0",
+  };
+
+  let usage = null;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(url, { headers, signal: controller.signal });
+    clearTimeout(timer);
+    if (res.ok) usage = await res.json();
+  } catch {}
+  if (!usage) {
+    // Node/Bun TLS fingerprint sometimes draws a 403 from this endpoint; curl works.
+    try {
+      const r = spawnSync("curl", ["-s", "--max-time", "2", url, "-H", `Authorization: Bearer ${token}`, "-H", "anthropic-beta: oauth-2025-04-20", "-H", "Accept: application/json"], { encoding: "utf8" });
+      if (!r.error && r.status === 0 && r.stdout) usage = JSON.parse(r.stdout);
+    } catch {}
+  }
+
+  const sonnet = usage && typeof usage === "object" ? usage.seven_day_sonnet ?? null : prev?.data ?? null;
+  // Always bump the timestamp (even on failure) so we don't re-hit the API before the TTL.
+  try {
+    require("node:fs").writeFileSync(cacheFile, JSON.stringify({ ts: Date.now(), data: sonnet }));
+  } catch {}
+  return sonnet;
+}
+
+const raw = await Bun.stdin.text();
+if (!raw) process.exit(0);
+
+let data;
+try {
+  data = JSON.parse(raw);
+} catch {
+  process.exit(0);
+}
+
+const settings = readJson(join(HOME, ".claude", "settings.json")) || {};
+const transcript = parseTranscript(data.transcript_path);
+const acc = accumulateStats(data.transcript_path, data.session_id);
+
+const modelId = data.model?.id || "";
+const model = data.model?.display_name || "Unknown Model";
+const effort = data.effort?.level || settings.effortLevel || defaultEffort(modelId, model);
+const fastMode = settings.fastMode === true;
+
+const usage = data.context_window?.current_usage;
+const contextSize = Number(data.context_window?.context_window_size) || 200000;
+const inputTokens = usage
+  ? (Number(usage.input_tokens) || 0) + (Number(usage.cache_creation_input_tokens) || 0) + (Number(usage.cache_read_input_tokens) || 0)
+  : 0;
+const outputTokens = usage ? Number(usage.output_tokens) || 0 : Number(data.context_window?.total_output_tokens) || 0;
+const sessionOutputTokens = Number(data.context_window?.total_output_tokens) || outputTokens;
+const officialUsed = data.context_window?.used_percentage;
+const usedInt = officialUsed !== null && officialUsed !== undefined && officialUsed !== ""
+  ? Math.round(Number(officialUsed))
+  : percent(inputTokens, contextSize);
+
+const cost = Number(data.cost?.total_cost_usd) || 0;
+const costStr = formatCost(cost);
+
+const sid = String(data.session_id || "").trim(); // full UUID — usable with `claude --resume <id>`
+const elapsedMs = typeof data.cost?.total_duration_ms === "number" && data.cost.total_duration_ms > 0
+  ? data.cost.total_duration_ms
+  : transcript?.sessionStartTime
+    ? Date.now() - transcript.sessionStartTime
+    : 0;
+const elapsedMinutes = elapsedMs / 60000;
+
+const currentDir = data.cwd || data.workspace?.current_dir || data.worktree?.original_cwd;
+
+// rate_limits stdin only exposes five_hour + seven_day (seven_day already covers all models,
+// incl. Sonnet). The Sonnet-specific weekly is API-only (oauth/usage) — not worth a token+fetch.
+const rl5 = rlBlock(data.rate_limits?.five_hour, "5h", "auto"); // day abbrev only if it rolls to next day
+const rl7 = rlBlock(data.rate_limits?.seven_day, "7d", "ddd HH:mm");
+// Sonnet weekly is API-only — only bother for Pro/Max sessions (rate_limits present in stdin).
+const sonnetUsage = data.rate_limits ? await fetchSonnetUsage() : null;
+const rl7s = rlBlock(sonnetUsage, "7dS", "ddd HH:mm");
+const rlBlocks = [rl5, rl7, rl7s].filter(Boolean);
+
+let gitStr = "no branch";
+let repoRoot = currentDir; // working-tree root (the worktree's OWN dir when in a linked worktree)
+let mainRoot = null; // MAIN repo root (parent of the shared git common dir) — drives the FOLDER name
+let inRepo = false;
+let tagInfo = null;
+if (currentDir && existsSync(currentDir)) {
+  const st = gitStatus(currentDir);
+  if (st) {
+    inRepo = true;
+    // One rev-parse, two outputs: line 1 = working-tree root (--show-toplevel); line 2 = the COMMON
+    // git dir (--git-common-dir), shared by every worktree. The common dir's PARENT is the main repo
+    // root — so a linked worktree shows its PARENT repo (e.g. "topside-events") as the folder instead
+    // of echoing the worktree's own name (which the worktree segment already shows).
+    const rp = git(currentDir, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]);
+    let common = null;
+    if (rp) {
+      const lines = rp.split("\n").map((s) => s.trim()).filter(Boolean);
+      if (lines[0]) repoRoot = lines[0];
+      common = lines[1] || null;
+    } else {
+      const top = git(currentDir, ["rev-parse", "--show-toplevel"]); // fallback for git < 2.31
+      if (top && top.trim()) repoRoot = top.trim();
+    }
+    const stripped = common ? common.replace(/[\\/]\.git[\\/]*$/i, "") : ""; // drop trailing /.git
+    mainRoot = stripped && stripped !== common ? stripped : repoRoot; // parent of common .git, else toplevel
+
+    gitStr = st.branch || "no branch";
+    if (st.ahead > 0) gitStr += ` ${GREEN}${gAhead}${st.ahead}${RESET}`;
+    if (st.behind > 0) gitStr += ` ${YELLOW}${gBehind}${st.behind}${RESET}`;
+    if (st.staged > 0) gitStr += ` ${GREEN}+${st.staged}${RESET}`;
+    if (st.modified > 0) gitStr += ` ${YELLOW}~${st.modified}${RESET}`;
+    if (st.untracked > 0) gitStr += ` ${BBLUE}?${st.untracked}${RESET}`;
+    if (st.conflicts > 0) gitStr += ` ${RED}!${st.conflicts}${RESET}`;
+
+    tagInfo = latestTagStatus(currentDir);
+  }
+}
+
+const normPath = (s) => String(s || "").replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+const isWorktree = inRepo && !!mainRoot && normPath(mainRoot) !== normPath(repoRoot);
+// worktree label: CC's --worktree name, else any git-worktree name, else the worktree dir basename.
+const worktree = data.worktree?.name || data.workspace?.git_worktree || (isWorktree ? basename(repoRoot) : "");
+
+// displayRoot = the WORKING tree (config counts + git all read the worktree's own checkout).
+const displayRoot = repoRoot || data.workspace?.project_dir || currentDir;
+// …but the Repo headline NAME comes from the main repo root, so a worktree shows its parent repo.
+// (Where you are WITHIN the tree is no longer folded in here — the Info. row's CWD shows the literal
+// path now, so the Repo row is pure project identity + git state.)
+const dirName = mainRoot || displayRoot ? basename(mainRoot || displayRoot) : "unknown";
+
+const sessionSegs = [];
+sessionSegs.push(`${CYAN}${gModel}${RESET} ${BOLD}${model}${fastMode ? ` ${YELLOW}${gSpeed}${RESET}` : ""}${RESET}`);
+if (effort) sessionSegs.push(effortStyle(effort));
+// Context gauge degrades like the rate-limit gauges: bar when the row fits, %-only when it wraps.
+const ctxPct = `${contextColor(usedInt)}${usedInt}%${RESET} ${SOFT}${formatTokens(inputTokens)}/${formatTokens(contextSize)}${RESET}`;
+const ctxFull = `${PINK}${gCtx}${RESET} ${makeBar(usedInt, 10, contextColor(usedInt))} ${ctxPct}`;
+const ctxCompact = `${PINK}${gCtx}${RESET} ${ctxPct}`;
+sessionSegs.push({ alts: [ctxFull, ctxCompact] });
+// cost + duration moved to the Usage row, session-id to Info. — Model row stays lean (AI state only).
+
+
+// Each gauge (5h/7d/7dS) is its OWN packer item so they can wrap to a new line individually
+// when the row runs out of width. The clock is a row "lead" (rendered once, before the first
+// gauge) so wrapped gauges indent past it and line up TEXT-under-TEXT (7dS under 5h, not the icon).
+// alts = [full-with-bar, compact-no-bar]; packSection keeps the bar unless it can't fit a line.
+const quotaSegs = [];
+let clockLead = "";
+// The clock glyph renders as 1 cell + 1 trailing space in this terminal (vlen would guess 2),
+// so pass its TRUE width to packSection or continuation lines indent one cell too far right.
+let clockLeadW = 0;
+if (rlBlocks.length) {
+  const maxP = Math.max(...rlBlocks.map((b) => b[0]));
+  const clockColor = maxP >= 70 ? usageColor(maxP) : WHITE;
+  clockLead = `${clockColor}${gClock}${RESET} `;
+  clockLeadW = 2;
+  rlBlocks.forEach((b) => quotaSegs.push({ alts: [b[1], b[2]] }));
+}
+
+// Usage — this session's consumption: total cost, $/h burn, throughput (tok/s), API time, wall-clock.
+// (var stays `rateSegs`; rendered under the "Usage" label.)
+const rateSegs = [];
+rateSegs.push(`${GREEN}${gCost}${RESET} ${VAL}${costStr}${RESET}`); // total $ spent
+const apiDurationMs = Number(data.cost?.total_api_duration_ms) || 0;
+if (cost > 0 && elapsedMinutes >= 1) {
+  const hourlyCost = (cost / elapsedMinutes) * 60;
+  const hourlyColor = hourlyCost > 10 ? RED : hourlyCost > 5 ? YELLOW : GREEN;
+  rateSegs.push(`${ORANGE}${gCost}${RESET} ${hourlyColor}~${formatCost(hourlyCost)}/h${RESET}`); // burn rate
+}
+if (apiDurationMs > 0 && acc.outputTokens > 0) {
+  const tps = acc.outputTokens / (apiDurationMs / 1000); // cumulative output ÷ cumulative API time
+  if (Number.isFinite(tps) && tps > 0) {
+    rateSegs.push(`${PENCIL}${gSpeed}${RESET} ${VAL}${Math.round(tps)}${RESET} ${SOFT}tok/s${RESET}`);
+  }
+}
+// This is CC's cost.total_api_duration_ms shown VERBATIM (read above) — not computed/summed here.
+// GOTCHA: it's meant to be cumulative *active* API time, but CC's timer doesn't subtract a laptop
+// sleep/suspend, so if the machine sleeps mid-session this balloons to ~wall-clock (≈ elapsedMs).
+// Tell: API ≈ duration paired with implausibly low tok/s + $/h (the inflated denominator drags both
+// down). That's an upstream CC accounting artifact, NOT a bug here — don't "fix" it by clamping to
+// elapsedMs; that would just mask CC's number. (diagnosed from a real 11.9h-sleep session, 2026-06)
+if (apiDurationMs > 0 && elapsedMs > 0) {
+  const apiPct = Math.min(100, Math.round((apiDurationMs / elapsedMs) * 100));
+  const apiColor = apiPct > 70 ? YELLOW : VAL;
+  rateSegs.push(`${CYAN}${gApi}${RESET} ${apiColor}API ${formatDuration(apiDurationMs)}${RESET}`);
+}
+rateSegs.push(`${SILVER}${gDuration}${RESET} ${VAL}${formatDuration(elapsedMs)}${RESET}`); // wall-clock
+
+// turn — the last API call's token makeup (In/Out/W/R)
+const turnSegs = [];
+if (usage) {
+  const fresh = Number(usage.input_tokens) || 0;
+  const cacheWrite = Number(usage.cache_creation_input_tokens) || 0;
+  const cacheRead = Number(usage.cache_read_input_tokens) || 0;
+
+  const tokenParts = [];
+  if (fresh > 0) tokenParts.push(`${CYAN}${gIn}${RESET} ${VAL}${formatTokens(fresh)}${RESET}`);
+  if (outputTokens > 0) tokenParts.push(`${PENCIL}${gOut}${RESET} ${VAL}${formatTokens(outputTokens)}${RESET}`);
+  if (cacheWrite > 0) tokenParts.push(`${YELLOW}${gWrite}${RESET} ${VAL}${formatTokens(cacheWrite)}${RESET}`);
+  if (cacheRead > 0) tokenParts.push(`${GREEN}${gRead}${RESET} ${VAL}${formatTokens(cacheRead)}${RESET}`);
+  if (tokenParts.length) turnSegs.push(tokenParts.join(` ${SOFT}|${RESET} `));
+}
+
+const stateSegs = [];
+
+// CWD — the literal current directory (home-relativized to ~/…, leaf preserved when long). Leads the
+// Info. row so it's a stable "where am I" anchor right above the prompt, present in OR out of a repo.
+// (The Repo row no longer carries your location — it's repo-only now.)
+const cwdDisplay = shortenPath(homeRelative(currentDir));
+if (cwdDisplay) stateSegs.push(`${BBLUE}${gDir}${RESET} ${VAL}${cwdDisplay}${RESET}`);
+
+// Host row — everything that comes from the MACHINE: local clock (time is host-derived), OS, user@host.
+//   [clock] HH:mm | [os icon] os/version | [person icon] user@host
+// Clock updates each minute via statusLine.refreshInterval (event triggers go quiet when idle).
+// user@host: person icon + SSH-prompt style (no spaces around @); user from userInfo() w/ env fallback.
+const hostSegs = [];
+{
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  hostSegs.push(`${WHITE}${gClock}${RESET} ${VAL}${hh}:${mm}${RESET}`);
+
+  const b = osBadge();
+  hostSegs.push(`${b.color}${b.icon}${RESET} ${VAL}${b.label}${RESET}`);
+
+  const host = (hostname() || "").split(".")[0]; // drop .local / domain → short hostname
+  let user = "";
+  try { user = userInfo().username || ""; } catch {}
+  if (!user) user = process.env.USERNAME || process.env.USER || "";
+  if (user || host) {
+    const idStr = user && host ? `${VAL}${user}${DIM}@${VAL}${host}${RESET}` : `${VAL}${user || host}${RESET}`;
+    hostSegs.push(`${c256(114)}${gPerson}${RESET} ${idStr}`);
+  }
+}
+const outputStyle = data.output_style?.name;
+if (outputStyle && outputStyle !== "default") {
+  stateSegs.push(`${PENCIL}${gStyle}${RESET} ${VAL}${outputStyle}${RESET}`);
+}
+if (data.version) stateSegs.push(`${WHITE}${gVersion}${RESET} ${VAL}v${data.version}${RESET}`);
+// Vim mode — we render it ourselves and suppress Claude's native "-- INSERT --" via the
+// statusLine.hideVimModeIndicator setting (so the mode isn't shown twice). Modes per the docs:
+// NORMAL, INSERT, VISUAL, VISUAL LINE. INSERT=green (editing), VISUAL*=magenta (selection),
+// NORMAL/other=cyan.
+if (data.vim?.mode) {
+  const m = data.vim.mode;
+  const vimColor = m === "INSERT" ? GREEN : m.startsWith("VISUAL") ? MAGENTA : CYAN;
+  // Vim mode KEEPS italic (exception to the no-italic-in-content rule): it's all-caps, so the
+  // cursive isn't distracting and helps it read as a mode indicator.
+  stateSegs.push(`${vimColor}${gVim}${RESET} ${ITALIC}${vimColor}${m}${RESET}`);
+}
+if (data.agent?.name || data.agent_type) {
+  const parts = [];
+  if (data.agent?.name) parts.push(`${SILVER}${gUser}${RESET} ${VAL}${data.agent.name}${RESET}`);
+  if (data.agent_type) parts.push(`${CYAN}${gAgent}${RESET} ${VAL}${data.agent_type}${RESET}`);
+  stateSegs.push(parts.join(` ${SOFT}|${RESET} `));
+}
+// session id (first UUID segment) — for `claude --resume`; lives on the Info. row now.
+if (sid) stateSegs.push(`${SILVER}${gKey}${RESET} ${VAL}${sid.split("-")[0]}${RESET}`);
+
+// Peak hours disabled — Anthropic no longer distinguishes peak/off-peak for rate limits
+// (https://aitoolsrecap.com/Blog/anthropic-claude-code-rate-limits-doubled-opus-api-2026).
+// Keeping peakStatus()/pacificTime() in place in case it returns.
+// const peak = peakStatus();
+// stateSegs.push(`${peak.isPeak ? RED : CYAN}${peak.isPeak ? gPeak : gOffPeak}${RESET} ${SOFT}${peak.isPeak ? "Peak" : "Off"} ${formatCountdown(peak.minutesToTransition * 60000)}${RESET}`);
+
+const activitySegs = [];
+if (transcript?.activeSlashCommand?.name) {
+  activitySegs.push(`${YELLOW}${gCommand}${RESET} ${VAL}${transcript.activeSlashCommand.name}${RESET}`);
+}
+
+const todo = todoProgress(transcript);
+if (todo && todo.total > 0) {
+  const donePct = percent(todo.completed, todo.total);
+  const todoColor = donePct === 100 ? GREEN : donePct >= 50 ? YELLOW : RED;
+  if (todo.current) {
+    activitySegs.push(`${todoColor}${gTodo}${RESET} ${truncate(todo.current.content, 26)} ${todoColor}[${todo.completed}/${todo.total}]${RESET}`);
+  } else {
+    activitySegs.push(`${todoColor}${gTodo}${RESET} ${todo.completed}/${todo.total}`);
+  }
+}
+
+if (acc.toolCalls > 0) {
+  const lt = transcript?.lastTool;
+  const target = lt ? extractToolTarget(lt.name, lt.input) : null;
+  const label = lt ? (target ? `${lt.name}(${target})` : lt.name) : "tool";
+  const icon = transcript?.runningToolIds?.size > 0 ? YELLOW : SOFT; // yellow while a tool is mid-run
+  activitySegs.push(`${icon}${gTools}${RESET} ${label} ${SOFT}(${acc.toolCalls} calls)${RESET}`);
+}
+
+const agents = agentStatus(transcript);
+if (agents) {
+  if (agents.active.length > 0) {
+    const a = agents.active[0];
+    const more = agents.active.length > 1 ? ` +${agents.active.length - 1}` : "";
+    const desc = a.description ? `: ${truncate(a.description, 24)}` : "";
+    activitySegs.push(`${CYAN}${gAgent}${RESET} Agent ${a.name}${desc}${RESET}${more}`);
+  } else {
+    activitySegs.push(`${SOFT}${gAgent} agents ${agents.completed} done${RESET}`);
+  }
+}
+
+// Session edit volume (+added/−removed lines) — repo-independent (you can edit files outside any
+// repo), so it rides the always-present Activity row, NOT the now repo-only Repo row.
+const linesAdded = Number(data.cost?.total_lines_added) || 0;
+const linesRemoved = Number(data.cost?.total_lines_removed) || 0;
+if (linesAdded > 0 || linesRemoved > 0) {
+  const diff = [];
+  if (linesAdded > 0) diff.push(`${GREEN}+${linesAdded}${RESET}`);
+  if (linesRemoved > 0) diff.push(`${RED}-${linesRemoved}${RESET}`);
+  activitySegs.push(`${PENCIL}${gLines}${RESET} ${diff.join(" ")}`);
+}
+
+// Repo row — ONLY inside a git repo, and then pure repo identity + git state: headline project name
+// (git-folder glyph, distinct from the Info. row's plain-folder CWD), worktree, branch, tag. Outside
+// a repo locSegs stays empty → packSection emits nothing and the whole row disappears.
+const locSegs = [];
+if (inRepo) {
+  locSegs.push(`${BBLUE}${gTree}${RESET} ${VAL}${dirName}${RESET}`);
+  if (worktree) locSegs.push(`${MAGENTA}${gTree}${RESET} ${VAL}${worktree}${RESET}`);
+  locSegs.push(`${CYAN}${gBranch}${RESET} ${gitStr}`);
+  // PR — the current branch's OPEN pull request, straight from Claude Code's native `pr` payload
+  // (same source as CC's built-in footer PR badge, added ~v2.1.149): present only while a PR is
+  // open, gone the moment it merges/closes — so this appears/disappears exactly like the native
+  // badge, with NO `gh` call (zero cost, always fresh). Per the docs `pr` is a SINGLE object — CC
+  // surfaces only ONE PR per branch and the payload carries no array/count, so multiple open PRs on
+  // one branch can't be seen from here (only via `gh pr list --head`); we normalize defensively and
+  // append "+N" if CC ever sends a list. #number is colored by review_state (enum: approved/pending/
+  // changes_requested/draft): green ✓ · red ✗ · yellow ● · dim draft. (CI status isn't in the
+  // native payload either — both CI and true multi-PR awareness would need an opt-in `gh` call.)
+  const prList = Array.isArray(data.pr) ? data.pr.filter(Boolean) : data.pr ? [data.pr] : [];
+  if (prList.length) {
+    const prData = prList[0];
+    const rs = String(prData.review_state ?? prData.reviewDecision ?? "").toLowerCase();
+    let prColor = VAL;
+    let mark = "";
+    if (rs.includes("approv")) { prColor = GREEN; mark = ` ${GREEN}${gCheck}${RESET}`; }
+    else if (rs.includes("change")) { prColor = RED; mark = ` ${RED}${gX}${RESET}`; }
+    else if (rs.includes("draft")) { prColor = DIM; mark = ` ${DIM}draft${RESET}`; }
+    else if (rs.includes("pending") || rs.includes("review") || rs.includes("required")) { prColor = YELLOW; mark = ` ${YELLOW}●${RESET}`; }
+    const label = prData.number != null ? `#${prData.number}` : "PR";
+    const extra = prList.length > 1 ? ` ${SOFT}+${prList.length - 1}${RESET}` : "";
+    locSegs.push(`${MAGENTA}${gPR}${RESET} ${prColor}${label}${RESET}${mark}${extra}`);
+  }
+  if (tagInfo) {
+    const tagSuffix = tagInfo.count > 0 ? `${YELLOW}+${tagInfo.count}${RESET}` : "";
+    locSegs.push(`${MAGENTA}${gTag}${RESET} ${VAL}${tagInfo.tag}${RESET}${tagSuffix}`);
+  }
+}
+
+const addedDirCount = Array.isArray(data.workspace?.added_dirs) ? data.workspace.added_dirs.length : 0;
+const counts = displayRoot
+  ? cachedByMtime(
+      "cfg-" + hashPath(displayRoot),
+      [
+        displayRoot,
+        join(displayRoot, ".git", "index"), // invalidate recursive doc counts on add/commit
+        join(displayRoot, ".claude"),
+        join(displayRoot, ".claude", "agents"),
+        join(displayRoot, ".claude", "commands"),
+        join(displayRoot, ".claude", "skills"),
+        join(displayRoot, ".claude", "rules"),
+        join(displayRoot, ".claude", "output-styles"),
+        join(displayRoot, ".mcp.json"), // project (shared) MCP servers
+        join(displayRoot, "CLAUDE.md"),
+        join(displayRoot, "AGENTS.md"),
+        join(displayRoot, "CLAUDE.local.md"),
+        join(displayRoot, "AGENTS.local.md"),
+        join(HOME, ".claude.json"),
+        join(HOME, ".config", "claude-code", "mcp.json"),
+        join(HOME, ".claude", "settings.json"), // global hooks + enabledPlugins live here
+        join(displayRoot, ".claude", "settings.json"), // project hooks
+        join(displayRoot, ".claude", "settings.local.json"), // project-local hooks
+        join(HOME, ".claude", "agents"), // global agents/commands/skills/rules/styles
+        join(HOME, ".claude", "commands"),
+        join(HOME, ".claude", "skills"),
+        join(HOME, ".claude", "rules"),
+        join(HOME, ".claude", "output-styles"),
+        join(HOME, ".claude", "CLAUDE.md"), // user-scope memory (doc)
+        join(managedDir(), "managed-settings.json"), // enterprise/managed scope (hooks, claudeMd)
+        join(managedDir(), "managed-mcp.json"), // enterprise/managed MCP
+        join(managedDir(), "CLAUDE.md"), // enterprise/managed memory (doc)
+        join(HOME, ".claude", "plugins", "installed_plugins.json"), // plugin-provided component counts
+      ],
+      addedDirCount,
+      () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot)
+    )
+  : null;
+// config gets its OWN row (own section). Numeric counts (no ✓/✗). Repo-relative docs
+// (CLAUDE.md/AGENTS.md) only inside a repo; global items (hooks/plugins/global dirs) show
+// whenever present — they're active regardless of whether the cwd is a git repo.
+const configSegs = [];
+if (counts) {
+  // "[icon] total (m/u/p/l/x)" — dim breakdown for every multi-scope item (breakdown:true) when
+  // total>0. FIXED 5 columns, positions NEVER shift, broad→narrow: MANAGED / USER / PROJECT /
+  // LOCAL / PLUGIN (CC renamed old "global"→"user", old "project"→"local"; PLUGIN = components
+  // bundled by enabled plugins, lowest precedence). Each slot is ONE of two states:
+  //   digit/0 — item is CAPABLE of that scope (`caps`), so show its count (0 = none from that
+  //             scope; e.g. managed `m` reads 0 unless enterprise config defines some). Columns
+  //             are FIXED, so you read the count directly.
+  //   "-"     — scope is N/A: this item type CANNOT have it (`caps` lacks it) — e.g. agents/cmds/
+  //             skills have no managed/local form, rules/styles no managed/local/plugin form.
+  // (Now that capable-but-empty scopes read a true 0, "-" has a single unambiguous meaning: this
+  // scope can NEVER apply to this item — not merely "absent right now".)
+  const SCOPES = ["m", "u", "p", "l", "x"];
+  const total = (c) => (c.m || 0) + (c.u || 0) + (c.p || 0) + (c.l || 0) + (c.x || 0);
+  const seg = (head, c, { color = SOFT, breakdown = false, caps = "" } = {}) => {
+    const tail =
+      breakdown && total(c) > 0
+        ? ` ${DIM}(${SCOPES.map((k) => (caps.includes(k) ? c[k] || 0 : "-")).join("/")})${RESET}`
+        : "";
+    return `${color}${head}${RESET} ${total(c) > 0 ? GREEN : SOFT}${total(c)}${RESET}${tail}`;
+  };
+  // Every config widget renders its icon + count (0 included) so an empty category shows at a
+  // glance; the breakdown parens appear only once total>0 (an all-0/"-" breakdown is just noise).
+  const show = (head, c, opts) => configSegs.push(seg(head, c, opts));
+  // CLAUDE.md — doc icon, NO letter (AGENTS.md isn't loaded natively by CC, so there's nothing to
+  // disambiguate from). Counted like every other widget now: total across the scopes it CAN have,
+  // breakdown showing where they live. caps "mupl" — managed/user/project/local; plugins don't
+  // provide CLAUDE.md → "-".
+  show(gCfgDoc, counts.claude, { color: c256(36), breakdown: true, caps: "mupl" }); // teal
+  // Agents/Cmds/Skills: User + Project + Plugin (no local/managed form) → caps "upx".
+  // (Skills also subsumes output-styles — styles are migrating to skills, deduped by name:
+  //  https://support.claude.com/en/articles/10181068-styles-are-moving-to-skills)
+  show(gCfgAgents, counts.agents, { color: c256(211), breakdown: true, caps: "upx" }); // pink
+  show(gCfgCmds, counts.commands, { color: c256(32), breakdown: true, caps: "upx" }); // green
+  show(gCfgSkills, counts.skills, { color: c256(141), breakdown: true, caps: "upx" }); // purple — incl. styles
+  // Rules: User + Project only (plugins don't provide these) → caps "up".
+  show(gCfgRules, counts.rules, { color: c256(33), breakdown: true, caps: "up" }); // blue
+  // MCP & Hooks support every scope (managed + user/project/local + plugin) → caps "muplx".
+  show(gCfgMcp, counts.mcps, { color: c256(216), breakdown: true, caps: "muplx" }); // orange
+  show(gCfgConn, counts.connectors, { color: c256(117) }); // sky — account-level, no breakdown
+  // claude-in-chrome (built-in browser MCP): brand-colored Chrome glyph + uncolored ✓/✗ for ENABLED
+  // (extension installed + toggle on + onboarded). Not a count → no breakdown. Live-connected is
+  // session-only, so this is enabled, not connected.
+  configSegs.push(`${c256(75)}${gCfgChrome}${RESET} ${counts.chrome ? gOk : gNo}`);
+  show(gCfgHooks, counts.hooks, { color: c256(220), breakdown: true, caps: "muplx" }); // gold
+  show(gCfgPlugins, counts.plugins, { color: BRICK, breakdown: true, caps: "mupl" }); // LEGO red
+  show(gCfgDirs, counts.dirs, { color: c256(250) }); // silver — session-added dirs
+}
+
+// Width-aware reflow. Claude Code sets COLUMNS in recent versions. statusLine.padding indents
+// the whole line right by N chars (applied by CC's renderer, OUTSIDE our output), so it eats
+// into usable width — subtract it or wide rows overflow past COLUMNS and hard-wrap to col 0.
+const padding = readPositiveInt(settings.statusLine?.padding, 0);
+const width = (parseInt(process.env.COLUMNS, 10) || 1e9) - 1 - padding;
+const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+const isWide = (codePoint) =>
+  (codePoint >= 0xe000 && codePoint <= 0xf8ff) ||
+  (codePoint >= 0xf0000 && codePoint <= 0xffffd) ||
+  (codePoint >= 0x100000 && codePoint <= 0x10fffd);
+const vlen = (s) => {
+  let w = 0;
+  for (const ch of stripAnsi(s)) w += isWide(ch.codePointAt(0)) ? 2 : 1;
+  return w;
+};
+
+// Truncate to maxVisible cells while preserving ANSI escapes (so colors stay balanced),
+// adding an ellipsis. Prevents a single over-long item from overflowing → terminal hard-wrap.
+const truncateVisible = (s, maxVisible) => {
+  if (maxVisible < 2 || vlen(s) <= maxVisible) return s;
+  const limit = maxVisible - 1; // reserve 1 cell for the ellipsis
+  let out = "";
+  let visible = 0;
+  let i = 0;
+  while (i < s.length) {
+    if (s[i] === "\x1b") {
+      const m = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
+      if (m) {
+        out += m[0];
+        i += m[0].length;
+        continue;
+      }
+    }
+    const cp = s.codePointAt(i);
+    const chLen = cp > 0xffff ? 2 : 1;
+    const w = isWide(cp) ? 2 : 1;
+    if (visible + w > limit) break;
+    out += s.slice(i, i + chLen);
+    visible += w;
+    i += chLen;
+  }
+  return `${out}…${RESET}`;
+};
+
+// An item carries one or more `alts` ordered WIDEST-first (e.g. a gauge is [full-with-bar,
+// compact-no-bar]); plain strings become a single-alt item.
+const toItems = (segments) =>
+  segments.map((s) =>
+    typeof s === "string" ? { alts: [s], sep: " | " } : { alts: s.alts, sep: " | " },
+  );
+const SECTION_WIDTH = 8;
+const SEP = " | ";
+
+// `lead` is rendered once after the label (e.g. the clock on the limits row). `leadWidth` is its
+// TRUE rendered cell-width (icons here don't always match vlen's guess), used so continuation
+// lines indent PAST it and wrapped items align text-under-text, not under the lead's icon.
+function packSection(label, segments, lead = "", leadWidth = null) {
+  if (!segments.length) return [];
+
+  const items = toItems(segments);
+  // Capitalize the first char — labels render in italic, where title-case reads nicer.
+  const labelCap = label.charAt(0).toUpperCase() + label.slice(1);
+  const prefixPlain = labelCap.padEnd(SECTION_WIDTH);
+  const prefix = `${BOLD}${ITALIC}${SOFT}${prefixPlain}${RESET} ${lead}`;
+  // U+2800 (Braille blank) renders blank but is NOT whitespace, so Claude Code's per-line
+  // leading-whitespace strip leaves it intact — keeps wrapped rows aligned under the content.
+  const indentWidth = SECTION_WIDTH + 1 + (leadWidth ?? vlen(lead));
+  const indent = cp(0x2800).repeat(indentWidth);
+  const maxItemWidth = width - indentWidth; // widest an item can be on its own line
+
+  // A usage bar is a one-row luxury: show every item's WIDEST (bar) form only when the whole
+  // section fits on a single row. The moment it would wrap, drop to each item's narrowest
+  // (no-bar) form. Plain single-alt items are identical either way. Same rule everywhere.
+  const fullForms = items.map((it) => it.alts[0]);
+  const oneRow = vlen(prefix) + fullForms.reduce((w, f) => w + vlen(f), 0) + (items.length - 1) * SEP.length;
+  const forms = oneRow <= width ? fullForms : items.map((it) => it.alts[it.alts.length - 1]);
+
+  const rows = [];
+  let cur = prefix;
+  let curLen = vlen(prefix);
+  let placed = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    let form = forms[i];
+    // Only plain single-alt items may be ellipsis-truncated; gauges keep their narrowest form.
+    if (items[i].alts.length === 1 && vlen(form) > maxItemWidth) form = truncateVisible(form, maxItemWidth);
+    const formLen = vlen(form);
+
+    if (placed > 0 && curLen + SEP.length + formLen > width) {
+      // Out of room: keep a trailing " |" on the finished line as a continuation marker (dropping
+      // it silently reads as confusing), then start an aligned continuation line.
+      const marker = curLen + 2 <= width ? ` ${SOFT}|${RESET}` : "";
+      rows.push(cur + marker);
+      cur = indent + form;
+      curLen = indentWidth + formLen;
+    } else {
+      cur += (placed > 0 ? SEP : "") + form;
+      curLen += (placed > 0 ? SEP.length : 0) + formLen;
+    }
+    placed++;
+  }
+
+  rows.push(cur);
+  return rows;
+}
+
+const rows = [
+  // Label ≠ var name for a few (renamed for clearer categories): session→Model, rate→Usage,
+  // work→Repo. Vars kept to limit churn.
+  ...packSection("model", sessionSegs),
+  ...packSection("limits", quotaSegs, clockLead, clockLeadW),
+  ...packSection("usage", rateSegs),
+  ...packSection("turn", turnSegs),
+  ...packSection("activity", activitySegs),
+  ...packSection("repo", locSegs),
+  ...packSection("config", configSegs),
+  ...packSection("host", hostSegs),
+  // "Info." row LAST — nearest the prompt. Leads with the CWD (always-present location anchor — the
+  // Repo row above is repo-only now), then vim mode (where CC's native "-- INSERT --" used to sit),
+  // output-style, version, agent name/type, and session id.
+  ...packSection("info.", stateSegs),
+].filter(Boolean);
+
+// One blank line below the dashboard (gap before the prompt). A bare trailing "\n" gets trimmed
+// by Claude Code (it strips empty/whitespace rows), so emit a final row holding a single U+2800
+// (Braille blank) — invisible but non-empty, so it survives as a real, blank-looking row.
+process.stdout.write(rows.join("\n") + "\n" + cp(0x2800));
