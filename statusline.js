@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 // Cross-platform Claude Code status line. Run via: bun statusline-command.js
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import {
   closeSync,
   existsSync,
@@ -36,6 +36,15 @@ const TRACK = `${esc}[48;5;236m`; // empty-bar track — a clearly DARK, uniform
 const BARLO = `${esc}[38;5;246m`;
 const RESET = `${esc}[0m`;
 const c256 = (n) => `${esc}[38;5;${n}m`; // 256-color foreground helper (config-row icon colors)
+const BEL = "\x07";
+
+// OSC 8 hyperlinks (Cmd/Ctrl-click). ON by default; opt out with CLAUDE_STATUSLINE_HYPERLINKS=0.
+// Conformant terminals that lack support render the plain text (non-clickable); the few setups that
+// leak the raw escape (some tmux/ssh configs) can disable it. Emits BEL-terminated OSC 8 (the form
+// the docs use); stripAnsi/truncateVisible below are taught to treat these sequences as zero-width.
+const HYPERLINKS = process.env.CLAUDE_STATUSLINE_HYPERLINKS !== "0";
+const hlink = (text, url) =>
+  HYPERLINKS && url ? `${esc}]8;;${url}${BEL}${text}${esc}]8;;${BEL}` : text;
 
 // Nerd Font glyphs only. Use fromCodePoint for symbols above U+FFFF.
 const cp = (n) => String.fromCodePoint(n);
@@ -44,6 +53,7 @@ const gEffort = cp(0xf0e7); // nf-fa-bolt
 const gCtx = cp(0xe28c); // nf-fae-brain
 const gCost = cp(0xf0d6); // nf-fa-money
 const gClock = cp(0xf0150); // nf-md-clock
+const gGauge = cp(0xf029a); // nf-md-gauge — Limits-row lead (a quota meter; keeps the clock unique to the real time on Host)
 const gDuration = cp(0xf252); // nf-fa-hourglass_half
 const gDir = cp(0xf07c); // nf-fa-folder_open
 const gTree = cp(0xe5fb); // nf-custom-folder_git_branch
@@ -60,6 +70,7 @@ const gTokens = cp(0xf080); // nf-fa-bar_chart
 const gSpeed = cp(0xf0e7); // nf-fa-bolt
 const gApi = cp(0xf2f2); // nf-fa-stopwatch — API time
 const gStyle = cp(0xf1fc); // nf-fa-paint_brush
+const gThink = cp(0xf06e8); // nf-md-lightbulb_on — extended thinking enabled (distinct from gCtx's brain)
 const gVersion = cp(0xf121); // nf-fa-code
 const gWin = cp(0xf05b3); // nf-md-microsoft_windows
 const gApple = cp(0xf0035); // nf-md-apple
@@ -91,6 +102,12 @@ const gCfgHooks = cp(0xf06e2); // nf-md-hook
 const gCfgPlugins = cp(0xf1288); // nf-md-toy_brick (LEGO)
 const gCfgConn = cp(0xf015f); // nf-md-cloud — claude.ai connectors
 const gCfgDirs = cp(0xf0257); // nf-md-folder_plus
+// Components-row icons (plugin-exclusive component types) — all Material Design.
+const gCfgLsp = cp(0xf0761); // nf-md-code_braces — LSP / language servers
+const gCfgMonitor = cp(0xf0437); // nf-md-radar — background monitors
+const gCfgTheme = cp(0xf03d8); // nf-md-palette — color themes (artist's palette)
+const gCfgBin = cp(0xf0614); // nf-md-application — bin/ executables on PATH
+const gCfgChannel = cp(0xf028c); // nf-md-forum — message channels (telegram/slack-style injection)
 const gCfgChrome = cp(0xf268); // nf-fa-chrome — claude-in-chrome (FA exception in this MD row; if it renders blank use nf-md-google_chrome 0xf02af)
 const gOk = cp(0x2714) + cp(0xfe0e); // ✔︎ heavy check + U+FE0E text-presentation selector (forces glyph, never emoji)
 const gNo = cp(0x2718) + cp(0xfe0e); // ✘︎ heavy ballot X + text-presentation selector
@@ -597,32 +614,87 @@ function pluginInstallPath(key, installed) {
   return recs[recs.length - 1]?.installPath || recs[0]?.installPath || null;
 }
 
+// Component declarations can live INLINE in a plugin's MARKETPLACE entry (with `strict:false`)
+// instead of the plugin's own files — the official LSP plugins (typescript-lsp, pyright-lsp, …) do
+// exactly this: their installed dir is a LICENSE/README stub and `lspServers` lives in
+// marketplace.json. Resolve a plugin key (`name@marketplace`) to that entry object ({} if none).
+// `cache` memoizes the per-marketplace file read across the many plugins in one count pass.
+function marketplaceEntry(key, cache) {
+  const at = String(key).indexOf("@");
+  if (at < 0) return {};
+  const base = key.slice(0, at);
+  const mp = key.slice(at + 1);
+  if (!mp) return {};
+  if (!cache.has(mp)) {
+    const j = readJson(join(HOME, ".claude", "plugins", "marketplaces", mp, ".claude-plugin", "marketplace.json"));
+    const list = Array.isArray(j?.plugins)
+      ? j.plugins
+      : j?.plugins && typeof j.plugins === "object"
+        ? Object.values(j.plugins)
+        : [];
+    cache.set(mp, list);
+  }
+  return cache.get(mp).find((p) => p && p.name === base) || {};
+}
+
 // Components an ENABLED plugin bundles, summed across all enabled plugins (de-duped by base name so
 // a plugin enabled from two marketplaces counts once). This is the "plugin" (x) scope — the lowest-
 // precedence source for agents/commands/skills/hooks/MCP (docs: plugins-reference component dirs).
 function pluginComponentCounts(projectDir, trusted, disabled, needsAuth) {
-  const out = { agents: 0, commands: 0, skills: 0, hooks: 0, mcps: 0 };
+  const out = { agents: 0, commands: 0, skills: 0, hooks: 0, mcps: 0, lsp: 0, monitors: 0, themes: 0, bin: 0, channels: 0 };
   const installed = readJson(join(HOME, ".claude", "plugins", "installed_plugins.json"));
   const seen = new Set();
+  const mpCache = new Map(); // memoize marketplace.json reads across plugins
   for (const key of pluginEnabledKeys(projectDir, trusted)) {
     const base = key.split("@")[0];
     if (seen.has(base)) continue;
     const root = pluginInstallPath(key, installed);
     if (!root || !existsSync(root)) continue;
     seen.add(base);
-    const manifest = readJson(join(root, ".claude-plugin", "plugin.json")) || {};
+    // Effective inline-component source: the plugin's own plugin.json merged OVER its marketplace
+    // entry (plugin.json wins). For stub plugins the entry supplies lspServers/mcpServers/etc.; for
+    // normal plugins the entry is empty and plugin.json/files provide everything. (File-based reads
+    // below still come from the install dir `root`.)
+    const eff = { ...marketplaceEntry(key, mpCache), ...(readJson(join(root, ".claude-plugin", "plugin.json")) || {}) };
     out.agents += countMdRecursive(join(root, "agents"));
     out.commands += countMdRecursive(join(root, "commands"));
     out.skills += countFiles(join(root, "skills")); // each skill = a subdir
-    out.hooks += countHookMap(readJson(join(root, "hooks", "hooks.json"))?.hooks) + countHookMap(manifest.hooks);
+    out.skills += countFiles(join(root, "output-styles"), /\.md$/i); // plugin styles fold into skills (styles→skills migration)
+    out.hooks += countHookMap(readJson(join(root, "hooks", "hooks.json"))?.hooks) + countHookMap(eff.hooks);
     // plugin MCP servers are identified as "plugin:<base>:<server>" in disabledMcpServers — skip the off ones.
     // NOTE: a plugin .mcp.json declares servers at the TOP LEVEL ({ "<name>": {...} }), NOT wrapped in
     // `mcpServers` like a project .mcp.json. Accept either form (prefer the wrapper when present).
     const mcpFile = readJson(join(root, ".mcp.json")) || {};
     const fileServers = mcpFile.mcpServers && typeof mcpFile.mcpServers === "object" ? mcpFile.mcpServers : mcpFile;
-    const servers = { ...fileServers, ...(manifest.mcpServers || {}) };
+    const servers = { ...fileServers, ...(eff.mcpServers || {}) };
     for (const s of Object.keys(servers))
       if (!disabled.has(`plugin:${base}:${s}`) && !needsAuth.has(`plugin:${base}:${s}`)) out.mcps++;
+
+    // --- Plugin-exclusive component types (the "Components" row). All x-scope only. ---
+    // LSP: `.lsp.json` is a TOP-LEVEL lang→config map (NOT wrapped in `lspServers` like a project
+    // file); inline form uses eff.lspServers as an object. Count distinct language keys.
+    const lspFile = readJson(join(root, ".lsp.json"));
+    const lspInline = eff.lspServers && typeof eff.lspServers === "object" && !Array.isArray(eff.lspServers) ? eff.lspServers : {};
+    const lspMap = lspFile && typeof lspFile === "object" && !Array.isArray(lspFile) ? lspFile : {};
+    out.lsp += new Set([...Object.keys(lspMap), ...Object.keys(lspInline)]).size;
+
+    // Monitors: `monitors/monitors.json` is a JSON ARRAY; inline `experimental.monitors` (an array,
+    // or a path string we don't resolve) REPLACES the default file per the path-behavior rules.
+    const monInline = eff.experimental?.monitors ?? eff.monitors;
+    if (Array.isArray(monInline)) out.monitors += monInline.length;
+    else if (typeof monInline !== "string") {
+      const monFile = readJson(join(root, "monitors", "monitors.json"));
+      if (Array.isArray(monFile)) out.monitors += monFile.length;
+    } // string = path form (replaces default), left uncounted
+
+    // Themes: JSON files in themes/; an inline experimental.themes array of paths replaces the default.
+    const themeInline = eff.experimental?.themes ?? eff.themes;
+    if (Array.isArray(themeInline)) out.themes += themeInline.length;
+    else if (typeof themeInline !== "string") out.themes += countFiles(join(root, "themes"), /\.json$/i);
+
+    // bin/: executables added to PATH (count all entries). channels[]: declared in the eff.
+    out.bin += countFiles(join(root, "bin"));
+    out.channels += Array.isArray(eff.channels) ? eff.channels.length : 0;
   }
   return out;
 }
@@ -791,6 +863,13 @@ function configCounts(projectDir, addedDirs, currentDir, mainRoot) {
     plugins: pluginsBreakdown(projDir, trusted, managed),
     connectors: connectorsBreakdown(),
     dirs: { l: Array.isArray(addedDirs) ? addedDirs.length : 0 }, // session-added dirs (local-ish)
+    // Plugin-exclusive component types → the "Components" row. x-only except themes, which also
+    // lives in ~/.claude/themes/ (user scope), so it gets a u/x breakdown.
+    lsp: { x: plug.lsp },
+    monitors: { x: plug.monitors },
+    themes: { u: countFiles(join(HOME, ".claude", "themes"), /\.json$/i), x: plug.themes },
+    bin: { x: plug.bin },
+    channels: { x: plug.channels },
   };
 }
 
@@ -1307,8 +1386,32 @@ function readOauthToken() {
   }
 }
 
-async function fetchSonnetUsage(ttlMs = 5 * 60 * 1000) {
-  const cacheFile = (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/") + "/sl-usage.json";
+const SONNET_TTL_MS = 5 * 60 * 1000;
+const sonnetCacheFile = () => (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/") + "/sl-usage.json";
+
+// Synchronous, network-free read of the cached Sonnet usage — used by the render path so it never
+// blocks. `fresh` = within the TTL (no refresh needed).
+function readSonnetCache() {
+  const prev = readJson(sonnetCacheFile());
+  const fresh = !!(prev && typeof prev.ts === "number" && Date.now() - prev.ts < SONNET_TTL_MS);
+  return { data: prev?.data ?? null, fresh };
+}
+
+// Fire-and-forget: relaunch THIS script with a flag so a DETACHED child does the (slow) network
+// refresh and writes the cache, while the foreground render returns immediately. stdio is ignored so
+// the child has no stdin (its fast path exits before the stdin read) and no terminal output.
+function spawnUsageRefresh() {
+  try {
+    spawn(process.execPath, [Bun.main], {
+      env: { ...process.env, CLAUDE_STATUSLINE_USAGE_REFRESH: "1" },
+      detached: true,
+      stdio: "ignore",
+    }).unref();
+  } catch {}
+}
+
+async function fetchSonnetUsage(ttlMs = SONNET_TTL_MS) {
+  const cacheFile = sonnetCacheFile();
   const prev = readJson(cacheFile);
   if (prev && typeof prev.ts === "number" && Date.now() - prev.ts < ttlMs) return prev.data ?? null; // fresh
 
@@ -1345,6 +1448,14 @@ async function fetchSonnetUsage(ttlMs = 5 * 60 * 1000) {
     require("node:fs").writeFileSync(cacheFile, JSON.stringify({ ts: Date.now(), data: sonnet }));
   } catch {}
   return sonnet;
+}
+
+// Detached usage-refresh fast path (see spawnUsageRefresh): a backgrounded copy lands here, updates
+// the Sonnet usage cache, and exits WITHOUT rendering — so the foreground never blocks on the network.
+// Must run before the stdin read; the detached child has no stdin.
+if (process.env.CLAUDE_STATUSLINE_USAGE_REFRESH === "1") {
+  await fetchSonnetUsage();
+  process.exit(0);
 }
 
 const raw = await Bun.stdin.text();
@@ -1396,7 +1507,13 @@ const currentDir = data.cwd || data.workspace?.current_dir || data.worktree?.ori
 const rl5 = rlBlock(data.rate_limits?.five_hour, "5h", "auto"); // day abbrev only if it rolls to next day
 const rl7 = rlBlock(data.rate_limits?.seven_day, "7d", "ddd HH:mm");
 // Sonnet weekly is API-only — only bother for Pro/Max sessions (rate_limits present in stdin).
-const sonnetUsage = data.rate_limits ? await fetchSonnetUsage() : null;
+// Serve cached Sonnet usage INSTANTLY; refresh out-of-band when stale (never await the network here).
+let sonnetUsage = null;
+if (data.rate_limits) {
+  const cached = readSonnetCache();
+  sonnetUsage = cached.data;
+  if (!cached.fresh) spawnUsageRefresh();
+}
 const rl7s = rlBlock(sonnetUsage, "7dS", "ddd HH:mm");
 const rlBlocks = [rl5, rl7, rl7s].filter(Boolean);
 
@@ -1452,9 +1569,17 @@ const dirName = mainRoot || displayRoot ? basename(mainRoot || displayRoot) : "u
 
 const sessionSegs = [];
 sessionSegs.push(`${CYAN}${gModel}${RESET} ${BOLD}${model}${fastMode ? ` ${YELLOW}${gSpeed}${RESET}` : ""}${RESET}`);
-if (effort) sessionSegs.push(effortStyle(effort));
+// Effort badge, with a thinking lamp tacked on (same packer item, no separator) when extended
+// thinking is on — so AI-reasoning state reads as one unit, e.g. "xhigh 💡". Lamp alone if no effort.
+const thinkMark = data.thinking?.enabled ? ` ${c256(183)}${gThink}${RESET}` : "";
+if (effort) sessionSegs.push(effortStyle(effort) + thinkMark);
+else if (thinkMark) sessionSegs.push(thinkMark.trimStart());
 // Context gauge degrades like the rate-limit gauges: bar when the row fits, %-only when it wraps.
-const ctxPct = `${contextColor(usedInt)}${usedInt}%${RESET} ${SOFT}${formatTokens(inputTokens)}/${formatTokens(contextSize)}${RESET}`;
+// exceeds_200k_tokens is a FIXED 200k threshold regardless of window size. On an extended-context
+// (>200k) model that's the premium long-context pricing line, so flag it; on a plain 200k model it's
+// just "full" (used% already says that), so suppress to avoid noise.
+const over200k = data.exceeds_200k_tokens === true && contextSize > 200000 ? ` ${RED}200K+${RESET}` : "";
+const ctxPct = `${contextColor(usedInt)}${usedInt}%${RESET} ${SOFT}${formatTokens(inputTokens)}/${formatTokens(contextSize)}${RESET}${over200k}`;
 const ctxFull = `${PINK}${gCtx}${RESET} ${makeBar(usedInt, 10, contextColor(usedInt))} ${ctxPct}`;
 const ctxCompact = `${PINK}${gCtx}${RESET} ${ctxPct}`;
 sessionSegs.push({ alts: [ctxFull, ctxCompact] });
@@ -1462,19 +1587,20 @@ sessionSegs.push({ alts: [ctxFull, ctxCompact] });
 
 
 // Each gauge (5h/7d/7dS) is its OWN packer item so they can wrap to a new line individually
-// when the row runs out of width. The clock is a row "lead" (rendered once, before the first
+// when the row runs out of width. A gauge glyph is the row "lead" (rendered once, before the first
 // gauge) so wrapped gauges indent past it and line up TEXT-under-TEXT (7dS under 5h, not the icon).
-// alts = [full-with-bar, compact-no-bar]; packSection keeps the bar unless it can't fit a line.
+// It's a quota meter (not a clock) — the real clock lives on the Host row; it tints toward the
+// usage color as you near a limit. alts = [full-with-bar, compact-no-bar].
 const quotaSegs = [];
-let clockLead = "";
-// The clock glyph renders as 1 cell + 1 trailing space in this terminal (vlen would guess 2),
+let limitLead = "";
+// The lead glyph renders as 1 cell + 1 trailing space in this terminal (vlen would guess 2),
 // so pass its TRUE width to packSection or continuation lines indent one cell too far right.
-let clockLeadW = 0;
+let limitLeadW = 0;
 if (rlBlocks.length) {
   const maxP = Math.max(...rlBlocks.map((b) => b[0]));
-  const clockColor = maxP >= 70 ? usageColor(maxP) : WHITE;
-  clockLead = `${clockColor}${gClock}${RESET} `;
-  clockLeadW = 2;
+  const limitColor = maxP >= 70 ? usageColor(maxP) : WHITE;
+  limitLead = `${limitColor}${gGauge}${RESET} `;
+  limitLeadW = 2;
   rlBlocks.forEach((b) => quotaSegs.push({ alts: [b[1], b[2]] }));
 }
 
@@ -1544,6 +1670,10 @@ const hostSegs = [];
   const b = osBadge();
   hostSegs.push(`${b.color}${b.icon}${RESET} ${VAL}${b.label}${RESET}`);
 
+  // Claude Code version sits with the OS here — both are "what's running" — leaving Info. as pure
+  // session/location. (Moved off the Info. row.)
+  if (data.version) hostSegs.push(`${WHITE}${gVersion}${RESET} ${VAL}v${data.version}${RESET}`);
+
   const host = (hostname() || "").split(".")[0]; // drop .local / domain → short hostname
   let user = "";
   try { user = userInfo().username || ""; } catch {}
@@ -1557,7 +1687,7 @@ const outputStyle = data.output_style?.name;
 if (outputStyle && outputStyle !== "default") {
   stateSegs.push(`${PENCIL}${gStyle}${RESET} ${VAL}${outputStyle}${RESET}`);
 }
-if (data.version) stateSegs.push(`${WHITE}${gVersion}${RESET} ${VAL}v${data.version}${RESET}`);
+// (Claude Code version moved to the Host row, grouped with the OS badge.)
 // Vim mode — we render it ourselves and suppress Claude's native "-- INSERT --" via the
 // statusLine.hideVimModeIndicator setting (so the mode isn't shown twice). Modes per the docs:
 // NORMAL, INSERT, VISUAL, VISUAL LINE. INSERT=green (editing), VISUAL*=magenta (selection),
@@ -1569,11 +1699,10 @@ if (data.vim?.mode) {
   // cursive isn't distracting and helps it read as a mode indicator.
   stateSegs.push(`${vimColor}${gVim}${RESET} ${ITALIC}${vimColor}${m}${RESET}`);
 }
-if (data.agent?.name || data.agent_type) {
-  const parts = [];
-  if (data.agent?.name) parts.push(`${SILVER}${gUser}${RESET} ${VAL}${data.agent.name}${RESET}`);
-  if (data.agent_type) parts.push(`${CYAN}${gAgent}${RESET} ${VAL}${data.agent_type}${RESET}`);
-  stateSegs.push(parts.join(` ${SOFT}|${RESET} `));
+// agent.name is the only documented agent field on stdin (the old `agent_type` branch was dead —
+// it's not in the schema). Shown when running under --agent / configured agent settings.
+if (data.agent?.name) {
+  stateSegs.push(`${SILVER}${gUser}${RESET} ${VAL}${data.agent.name}${RESET}`);
 }
 // session id (first UUID segment) — for `claude --resume`; lives on the Info. row now.
 if (sid) stateSegs.push(`${SILVER}${gKey}${RESET} ${VAL}${sid.split("-")[0]}${RESET}`);
@@ -1645,7 +1774,13 @@ if (linesAdded > 0 || linesRemoved > 0) {
 // a repo locSegs stays empty → packSection emits nothing and the whole row disappears.
 const locSegs = [];
 if (inRepo) {
-  locSegs.push(`${BBLUE}${gTree}${RESET} ${VAL}${dirName}${RESET}`);
+  // workspace.repo {host,owner,name} comes from the origin remote (absent without one). It's the
+  // single source for the GitHub-style URLs the headline/PR/tag hyperlinks point at. The DISPLAY
+  // text stays the folder basename (stable, matches your mental model); only the link comes from here.
+  const repo = data.workspace?.repo;
+  const repoBase =
+    repo?.host && repo?.owner && repo?.name ? `https://${repo.host}/${repo.owner}/${repo.name}` : "";
+  locSegs.push(`${BBLUE}${gTree}${RESET} ${VAL}${hlink(dirName, repoBase)}${RESET}`);
   if (worktree) locSegs.push(`${MAGENTA}${gTree}${RESET} ${VAL}${worktree}${RESET}`);
   locSegs.push(`${CYAN}${gBranch}${RESET} ${gitStr}`);
   // PR — the current branch's OPEN pull request, straight from Claude Code's native `pr` payload
@@ -1669,11 +1804,16 @@ if (inRepo) {
     else if (rs.includes("pending") || rs.includes("review") || rs.includes("required")) { prColor = YELLOW; mark = ` ${YELLOW}●${RESET}`; }
     const label = prData.number != null ? `#${prData.number}` : "PR";
     const extra = prList.length > 1 ? ` ${SOFT}+${prList.length - 1}${RESET}` : "";
-    locSegs.push(`${MAGENTA}${gPR}${RESET} ${prColor}${label}${RESET}${mark}${extra}`);
+    // pr.url makes our badge Cmd/Ctrl-clickable (CC's native footer badge already is; near-free here).
+    locSegs.push(`${MAGENTA}${gPR}${RESET} ${prColor}${hlink(label, prData.url)}${RESET}${mark}${extra}`);
   }
   if (tagInfo) {
     const tagSuffix = tagInfo.count > 0 ? `${YELLOW}+${tagInfo.count}${RESET}` : "";
-    locSegs.push(`${MAGENTA}${gTag}${RESET} ${VAL}${tagInfo.tag}${RESET}${tagSuffix}`);
+    // Tag → release page. The /releases/tag/ path is GitHub-specific, so only link on github hosts;
+    // other forges still get the plain tag text.
+    const tagUrl =
+      repoBase && /github/i.test(repo.host) ? `${repoBase}/releases/tag/${tagInfo.tag}` : "";
+    locSegs.push(`${MAGENTA}${gTag}${RESET} ${VAL}${hlink(tagInfo.tag, tagUrl)}${RESET}${tagSuffix}`);
   }
 }
 
@@ -1705,11 +1845,13 @@ const counts = displayRoot
         join(HOME, ".claude", "skills"),
         join(HOME, ".claude", "rules"),
         join(HOME, ".claude", "output-styles"),
+        join(HOME, ".claude", "themes"), // user color themes (Components row)
         join(HOME, ".claude", "CLAUDE.md"), // user-scope memory (doc)
         join(managedDir(), "managed-settings.json"), // enterprise/managed scope (hooks, claudeMd)
         join(managedDir(), "managed-mcp.json"), // enterprise/managed MCP
         join(managedDir(), "CLAUDE.md"), // enterprise/managed memory (doc)
         join(HOME, ".claude", "plugins", "installed_plugins.json"), // plugin-provided component counts
+        join(HOME, ".claude", "plugins", "plugin-catalog-cache.json"), // marketplace-inline components (LSP etc.)
       ],
       addedDirCount,
       () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot)
@@ -1719,6 +1861,7 @@ const counts = displayRoot
 // (CLAUDE.md/AGENTS.md) only inside a repo; global items (hooks/plugins/global dirs) show
 // whenever present — they're active regardless of whether the cwd is a git repo.
 const configSegs = [];
+const componentSegs = []; // the "Components" row — plugin-exclusive types, shown only when present
 if (counts) {
   // "[icon] total (m/u/p/l/x)" — dim breakdown for every multi-scope item (breakdown:true) when
   // total>0. FIXED 5 columns, positions NEVER shift, broad→narrow: MANAGED / USER / PROJECT /
@@ -1765,7 +1908,20 @@ if (counts) {
   configSegs.push(`${c256(75)}${gCfgChrome}${RESET} ${counts.chrome ? gOk : gNo}`);
   show(gCfgHooks, counts.hooks, { color: c256(220), breakdown: true, caps: "muplx" }); // gold
   show(gCfgPlugins, counts.plugins, { color: BRICK, breakdown: true, caps: "mupl" }); // LEGO red
+  // Themes belong with the multi-scope Config items, not the plugin-only Components row: a theme can
+  // come from a plugin (x) OR your own ~/.claude/themes/ (u), so it carries a u/x breakdown.
+  show(gCfgTheme, counts.themes, { color: c256(213), breakdown: true, caps: "ux" }); // orchid
   show(gCfgDirs, counts.dirs, { color: c256(250) }); // silver — session-added dirs
+
+  // Components row — plugin-exclusive component types (ALL x-scope only) that have no home on the
+  // Config row. Every widget always renders (0 included), consistent with the Config row, so an
+  // empty category shows at a glance. Being x-only, none show breakdown parens (same as
+  // connectors/chrome/dirs). (Themes is NOT here — it also has a user scope, so it lives on Config.)
+  const showC = (head, c, opts) => componentSegs.push(seg(head, c, opts));
+  showC(gCfgLsp, counts.lsp, { color: c256(81) }); // light blue
+  showC(gCfgMonitor, counts.monitors, { color: c256(209) }); // salmon
+  showC(gCfgBin, counts.bin, { color: c256(108) }); // sage
+  showC(gCfgChannel, counts.channels, { color: c256(116) }); // sky
 }
 
 // Width-aware reflow. Claude Code sets COLUMNS in recent versions. statusLine.padding indents
@@ -1773,7 +1929,10 @@ if (counts) {
 // into usable width — subtract it or wide rows overflow past COLUMNS and hard-wrap to col 0.
 const padding = readPositiveInt(settings.statusLine?.padding, 0);
 const width = (parseInt(process.env.COLUMNS, 10) || 1e9) - 1 - padding;
-const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
+// Strip SGR color codes AND OSC 8 hyperlink sequences (the open `ESC]8;;URL BEL` and the close
+// `ESC]8;;BEL`), so width math counts only visible glyphs. OSC 8 ends with BEL (\x07) or ST (ESC \).
+const stripAnsi = (s) =>
+  s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
 const isWide = (codePoint) =>
   (codePoint >= 0xe000 && codePoint <= 0xf8ff) ||
   (codePoint >= 0xf0000 && codePoint <= 0xffffd) ||
@@ -1792,12 +1951,21 @@ const truncateVisible = (s, maxVisible) => {
   let out = "";
   let visible = 0;
   let i = 0;
+  let linkOpen = false; // inside an OSC 8 hyperlink, so a mid-link break can be balanced
   while (i < s.length) {
     if (s[i] === "\x1b") {
-      const m = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
-      if (m) {
-        out += m[0];
-        i += m[0].length;
+      const sgr = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
+      if (sgr) {
+        out += sgr[0];
+        i += sgr[0].length;
+        continue;
+      }
+      // OSC 8 open/close are zero-width: copy through untouched, never split.
+      const osc = /^\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/.exec(s.slice(i));
+      if (osc) {
+        out += osc[0];
+        linkOpen = !/^\x1b\]8;;(?:\x07|\x1b\\)$/.test(osc[0]); // a close has nothing between ;; and the terminator
+        i += osc[0].length;
         continue;
       }
     }
@@ -1809,6 +1977,7 @@ const truncateVisible = (s, maxVisible) => {
     visible += w;
     i += chLen;
   }
+  if (linkOpen) out += `${esc}]8;;${BEL}`; // close a hyperlink left open by the truncation point
   return `${out}…${RESET}`;
 };
 
@@ -1878,16 +2047,17 @@ const rows = [
   // Label ≠ var name for a few (renamed for clearer categories): session→Model, rate→Usage,
   // work→Repo. Vars kept to limit churn.
   ...packSection("model", sessionSegs),
-  ...packSection("limits", quotaSegs, clockLead, clockLeadW),
+  ...packSection("limits", quotaSegs, limitLead, limitLeadW),
   ...packSection("usage", rateSegs),
   ...packSection("turn", turnSegs),
   ...packSection("activity", activitySegs),
   ...packSection("repo", locSegs),
   ...packSection("config", configSegs),
+  ...packSection("components", componentSegs),
   ...packSection("host", hostSegs),
   // "Info." row LAST — nearest the prompt. Leads with the CWD (always-present location anchor — the
   // Repo row above is repo-only now), then vim mode (where CC's native "-- INSERT --" used to sit),
-  // output-style, version, agent name/type, and session id.
+  // output-style, agent name, and session id. (Version moved to the Host row.)
   ...packSection("info.", stateSegs),
 ].filter(Boolean);
 

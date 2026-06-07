@@ -14,7 +14,9 @@ Each row is width-aware: it packs onto one line when it fits, wraps to aligned c
 lines when it doesn't, and gauges drop their progress bar before anything gets truncated.
 
 - **Model** — model name (⚡ when fast mode is on), reasoning effort (styled to echo Claude
-  Code's `/effort` menu), and a context-window gauge that warns early (yellow ≥50%, red ≥80%).
+  Code's `/effort` menu) with a 💡 lamp when extended thinking is on, and a context-window gauge
+  that warns early (yellow ≥50%, red ≥80%) plus a red `200K+` marker once you cross the fixed
+  200k long-context pricing line on an extended-context (>200k) model.
 - **Limits** — the `5h` and `7d` rate-limit windows with usage bars, percentages, and reset
   times; plus the Sonnet weekly window (fetched from the OAuth usage API, cached with a TTL).
 - **Usage** — total session cost, `$/h` burn rate, throughput (tok/s), API time, and wall-clock.
@@ -24,14 +26,20 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   volume (+added / −removed lines).
 - **Repo** — *(only inside a git repo)* project name, worktree, branch with ahead/behind and
   staged/modified/untracked/conflict counts, the current branch's open PR (colored by review
-  state), and the latest `v*` tag with commits-since.
+  state), and the latest `v*` tag with commits-since. The project name, PR, and tag are
+  clickable (OSC 8) when `workspace.repo` is available — Cmd/Ctrl-click to open on the host.
 - **Config** — what's actually loaded, each broken down by Claude Code's real config scopes
   **(managed / user / project / local / plugin)**, de-duped by precedence and gated on workspace
   trust: CLAUDE.md memory, agents, commands, skills (incl. output-styles), rules, MCP servers,
-  claude.ai connectors, claude-in-chrome, hooks, plugins, and session-added dirs.
-- **Host** — local clock, OS badge with real version, and `user@host`.
+  claude.ai connectors, claude-in-chrome, hooks, plugins, themes (plugin or your own
+  `~/.claude/themes/`), and session-added dirs.
+- **Components** — plugin-*exclusive* component types, each shown with its count (`0` included, the
+  same as Config): LSP servers, background monitors, `bin/` executables, and message channels.
+  Counts include components declared inline in a plugin's **marketplace entry**, not just in the
+  plugin's own files (which is how the official LSP plugins ship them).
+- **Host** — local clock, OS badge with real version, Claude Code version, and `user@host`.
 - **Info.** — current directory (home-relativized, leaf preserved when long), vim mode,
-  output style, Claude Code version, agent name/type, and the session id (for `claude --resume`).
+  output style, agent name, and the session id (for `claude --resume`).
 
 ## Requirements
 
@@ -49,7 +57,20 @@ Clone it anywhere you like:
 git clone https://github.com/anthonybaldwin/claude-statusline.git
 ```
 
-Then point Claude Code at it by adding a `statusLine` block to `~/.claude/settings.json`
+Then run the installer — it configures `~/.claude/settings.json` for you. It's a Bun script (Bun is
+required to run the status line anyway), so it works the same on Windows, macOS, and Linux:
+
+```bash
+cd claude-statusline
+bun install.js          # add --print to preview the changes without writing
+```
+
+It points Claude Code's `statusLine` and `subagentStatusLine` at these scripts, backs up any
+existing `settings.json`, and preserves your other keys. Restart Claude Code to see it.
+
+### Manual setup
+
+Prefer to wire it up by hand? Add a `statusLine` block to `~/.claude/settings.json`
 (adjust the path to wherever you cloned it):
 
 ```json
@@ -72,6 +93,23 @@ Then point Claude Code at it by adding a `statusLine` block to `~/.claude/settin
 That's it — no separate install step and nothing to copy into `~/.claude`. The script reads
 everything it needs (settings, transcript, project config) from their normal locations.
 
+## Subagent status line
+
+`subagent-statusline.js` implements Claude Code's
+[`subagentStatusLine`](https://code.claude.com/docs/en/statusline#subagent-status-lines) setting —
+the per-subagent row in the agent panel below the prompt. It renders each row as
+`name · description · ● · NNk tok`, colored by status (running / completed / error) and clamped to
+the row width, matching the main dashboard. Wire it up alongside `statusLine`:
+
+```json
+{
+  "subagentStatusLine": {
+    "type": "command",
+    "command": "bun \"/path/to/claude-statusline/subagent-statusline.js\""
+  }
+}
+```
+
 ## Configuration
 
 A couple of optional environment variables:
@@ -80,6 +118,7 @@ A couple of optional environment variables:
 | --- | --- | --- |
 | `CLAUDE_STATUSLINE_TRANSCRIPT_BYTES` | `1048576` (1 MiB) | How many trailing bytes of the transcript to parse per render. |
 | `CLAUDE_STATUSLINE_MANAGED_DIR` | platform default | Override the enterprise/managed config dir (for testing/relocation). |
+| `CLAUDE_STATUSLINE_HYPERLINKS` | `1` (on) | Set to `0` to disable OSC 8 hyperlinks (repo / PR / tag). Links degrade to plain text on terminals that ignore OSC 8; disable it if yours leaks the raw escape (some tmux/SSH setups). |
 
 It also honors a few `~/.claude/settings.json` keys when present: `effortLevel`, `fastMode`,
 and the `statusLine.padding` / `statusLine.refreshInterval` shown above.
