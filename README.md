@@ -1,8 +1,8 @@
 # claude-statusline
 
-A cross-platform [Claude Code](https://claude.com/claude-code) status line — context, cost,
-rate-limit windows, git, and full config-scope breakdowns — rendered as a multi-row dashboard
-with Nerd Font glyphs. One zero-dependency [Bun](https://bun.sh) script.
+A cross-platform [Claude Code](https://claude.com/claude-code) [status line](https://code.claude.com/docs/en/statusline) — context, cost,
+rate-limit windows, git, and full config-scope breakdowns — rendered as an opinionated, multi-row
+dashboard with Nerd Font glyphs. One zero-dependency [Bun](https://bun.sh) script.
 
 It reads the JSON Claude Code feeds to a status-line command on stdin (model, context window,
 cost, rate limits, cwd, git/PR, vim mode, …), enriches it with cheap local reads (git, config
@@ -19,8 +19,9 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   times; plus the Sonnet weekly window (fetched from the OAuth usage API, cached with a TTL).
 - **Usage** — total session cost, `$/h` burn rate, throughput (tok/s), API time, and wall-clock.
 - **Turn** — the last call's token makeup: input / output / cache-write / cache-read.
-- **Activity** — active slash command, todo progress, last tool call, sub-agents, and the
-  session's edit volume (+added / −removed lines).
+- **Activity** — active slash command, todo progress, last tool call, sub-agents (each running
+  agent with its own task count, plus a green ✔ tally of completed ones), and the session's edit
+  volume (+added / −removed lines).
 - **Repo** — *(only inside a git repo)* project name, worktree, branch with ahead/behind and
   staged/modified/untracked/conflict counts, the current branch's open PR (colored by review
   state), and the latest `v*` tag with commits-since.

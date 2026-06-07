@@ -851,7 +851,9 @@ function processTranscriptEntry(entry, state) {
       state.totalToolCalls++;
       state.lastTool = { name: block.name, input: block.input };
 
-      if (block.name === "Task") state.activeAgentIds.add(block.id);
+      // Sub-agent spawns: "Agent" is the current tool name; "Task" is the legacy name kept for
+      // older transcripts. Both land here so the active/done agent widget tracks either.
+      if (block.name === "Task" || block.name === "Agent") state.activeAgentIds.add(block.id);
 
       if (block.name === "TaskCreate") {
         const input = block.input || {};
@@ -1072,7 +1074,28 @@ function todoProgress(transcript) {
   };
 }
 
-function agentStatus(transcript) {
+// Map a sub-agent's spawning tool_use id → its own transcript file. Sub-agent transcripts live in
+// a documented sibling dir <transcript>/subagents/agent-<id>.jsonl, each paired with an
+// agent-<id>.meta.json carrying the spawning `toolUseId`. Returns null if the dir doesn't exist
+// (no sub-agents this session) so callers skip all extra I/O on the common idle path.
+function subagentFilesByToolId(transcriptPath) {
+  if (!transcriptPath) return null;
+  const dir = transcriptPath.replace(/\.jsonl$/i, "") + "/subagents";
+  let metas;
+  try {
+    metas = readdirSync(dir).filter((f) => f.endsWith(".meta.json"));
+  } catch {
+    return null;
+  }
+  const map = new Map();
+  for (const m of metas) {
+    const meta = readJson(join(dir, m));
+    if (meta?.toolUseId) map.set(meta.toolUseId, join(dir, m.replace(/\.meta\.json$/i, ".jsonl")));
+  }
+  return map;
+}
+
+function agentStatus(transcript, transcriptPath) {
   if (!transcript) return null;
   const active = [];
 
@@ -1081,9 +1104,26 @@ function agentStatus(transcript) {
     if (!tool) continue;
     const input = tool.input || {};
     active.push({
+      id,
       name: input.subagent_type || "Agent",
       description: input.description,
     });
+  }
+
+  // Attach each ACTIVE sub-agent's OWN task progress, read from its own transcript. Deliberately
+  // per-agent (shown on that agent's line, never summed and never merged with the main session's
+  // todo widget) so concurrent agents and a main-agent todo list stay distinct. Only runs while
+  // agents are active, so idle renders do no extra I/O.
+  if (active.length > 0) {
+    const byTool = subagentFilesByToolId(transcriptPath);
+    if (byTool) {
+      for (const a of active) {
+        const file = byTool.get(a.id);
+        if (!file) continue;
+        const tp = todoProgress(parseTranscript(file));
+        if (tp && tp.total > 0) a.tasks = { completed: tp.completed, total: tp.total };
+      }
+    }
   }
 
   if (active.length === 0 && transcript.completedAgentCount === 0) return null;
@@ -1568,15 +1608,24 @@ if (acc.toolCalls > 0) {
   activitySegs.push(`${icon}${gTools}${RESET} ${label} ${SOFT}(${acc.toolCalls} calls)${RESET}`);
 }
 
-const agents = agentStatus(transcript);
+const agents = agentStatus(transcript, data.transcript_path);
 if (agents) {
+  // Icon-forward, no filler words: the robot glyph already means "agent". Running and done are
+  // counted SEPARATELY and shown together — the focused active agent (with its own [done/total] if
+  // it keeps a task list), a +N for any other running agents, and a green ✔N tally of completed
+  // ones. Robot is cyan while anything runs, dimming to gray once all agents have finished.
+  const segs = [];
   if (agents.active.length > 0) {
     const a = agents.active[0];
-    const more = agents.active.length > 1 ? ` +${agents.active.length - 1}` : "";
     const desc = a.description ? `: ${truncate(a.description, 24)}` : "";
-    activitySegs.push(`${CYAN}${gAgent}${RESET} Agent ${a.name}${desc}${RESET}${more}`);
-  } else {
-    activitySegs.push(`${SOFT}${gAgent} agents ${agents.completed} done${RESET}`);
+    const prog = a.tasks ? ` ${CYAN}[${a.tasks.completed}/${a.tasks.total}]${RESET}` : ""; // that agent's OWN tasks
+    const more = agents.active.length > 1 ? ` ${SOFT}+${agents.active.length - 1}${RESET}` : "";
+    segs.push(`${VAL}${a.name}${RESET}${desc}${prog}${more}`);
+  }
+  if (agents.completed > 0) segs.push(`${GREEN}${gCheck} ${agents.completed}${RESET}`);
+  if (segs.length > 0) {
+    const robot = agents.active.length > 0 ? CYAN : SOFT;
+    activitySegs.push(`${robot}${gAgent}${RESET} ${segs.join(" ")}`);
   }
 }
 
