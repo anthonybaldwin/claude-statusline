@@ -32,7 +32,7 @@ const SOFT = `${esc}[38;5;245m`;
 const DIM = `${esc}[38;5;244m`; // (g/u/p) scope breakdown + doc notes — 244: dimmer than SOFT(245) but readable (240 was too dim)
 const VAL = `${esc}[97m`; // primary value text — neutral/bright (one knob) so threshold & semantic
 // colors (usage %, $/h, +/-, git counts, todo, vim) stand out instead of competing with a rainbow.
-const TRACK = `${esc}[48;5;236m`; // empty-bar track — a clearly DARK, uniform container (same at 0% or 60%)
+const TRACK = `${esc}[48;5;238m`; // empty-bar track — a DARK but visible container (slightly lighter than 236 so the unfilled portion reads against the terminal bg; same at 0% or 60%)
 const BARLO = `${esc}[38;5;246m`;
 const RESET = `${esc}[0m`;
 const c256 = (n) => `${esc}[38;5;${n}m`; // 256-color foreground helper (config-row icon colors)
@@ -644,6 +644,7 @@ function pluginComponentCounts(projectDir, trusted, disabled, needsAuth) {
   const out = { agents: 0, commands: 0, skills: 0, hooks: 0, mcps: 0, lsp: 0, monitors: 0, themes: 0, bin: 0, channels: 0 };
   const installed = readJson(join(HOME, ".claude", "plugins", "installed_plugins.json"));
   const seen = new Set();
+  const channelNames = new Set(); // plugin-DECLARED channel names (de-duped across plugins)
   const mpCache = new Map(); // memoize marketplace.json reads across plugins
   for (const key of pluginEnabledKeys(projectDir, trusted)) {
     const base = key.split("@")[0];
@@ -692,10 +693,22 @@ function pluginComponentCounts(projectDir, trusted, disabled, needsAuth) {
     if (Array.isArray(themeInline)) out.themes += themeInline.length;
     else if (typeof themeInline !== "string") out.themes += countFiles(join(root, "themes"), /\.json$/i);
 
-    // bin/: executables added to PATH (count all entries). channels[]: declared in the eff.
+    // bin/: executables added to PATH (count all entries).
     out.bin += countFiles(join(root, "bin"));
-    out.channels += Array.isArray(eff.channels) ? eff.channels.length : 0;
+    // channels[]: a plugin MAY declare message channels inline (string name, or {name|id}). In
+    // practice the official channel plugins (e.g. discord) DON'T — they register at runtime and the
+    // actual install is recorded under ~/.claude/channels/<name>/ (see userChannelNames), and CC's
+    // plugin catalog doesn't model channels as a component at all. So this is a near-dead forward-
+    // compat path; we collect names only so configCounts can de-dupe a declared channel against an
+    // installed one and avoid double-counting.
+    if (Array.isArray(eff.channels))
+      for (const ch of eff.channels) {
+        const name = typeof ch === "string" ? ch : ch && (ch.name || ch.id);
+        if (name) channelNames.add(name);
+      }
   }
+  out.channels = channelNames.size; // numeric tally (kept for parity with the other component counts)
+  out.channelNames = channelNames; // names, for de-dup against user-installed channels
   return out;
 }
 
@@ -709,6 +722,33 @@ function connectorsBreakdown() {
   if (!Array.isArray(arr)) return { u: 0 };
   const needsAuth = readJson(join(HOME, ".claude", "mcp-needs-auth-cache.json")) || {};
   return { u: arr.filter((name) => !(name in needsAuth)).length };
+}
+
+// Message channels installed at USER scope. Each configured channel lives in its OWN directory under
+// ~/.claude/channels/<name>/ — e.g. the discord plugin's setup (/discord:configure) writes a `.env`
+// (bot token) + `access.json` (allowlist/policy) into ~/.claude/channels/discord/. This dir is the
+// REAL "channel installed" signal: the official channel plugins don't declare a static `channels[]`
+// in their manifest and CC's plugin catalog doesn't track channels as a component, so counting plugin
+// manifests alone (plug.channels) misses every actually-installed channel. A non-empty subdir = one
+// configured channel; an empty leftover dir is ignored. Returns the set of channel names.
+function userChannelNames() {
+  const dir = join(HOME, ".claude", "channels");
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return new Set();
+  }
+  const names = new Set();
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    let configured = false;
+    try {
+      configured = readdirSync(join(dir, e.name)).length > 0; // holds config (.env / access.json / …)
+    } catch {}
+    if (configured) names.add(e.name);
+  }
+  return names;
 }
 
 // A workspace's PROJECT/LOCAL executable config only loads once you've accepted its trust dialog;
@@ -849,6 +889,11 @@ function configCounts(projectDir, addedDirs, currentDir, mainRoot) {
     cjr.cachedChromeExtensionInstalled === true &&
     cjr.claudeInChromeDefaultEnabled === true &&
     cjr.hasCompletedClaudeInChromeOnboarding === true;
+  // Channels: USER-scope installs under ~/.claude/channels/ (the authoritative signal) + any plugin-
+  // DECLARED channel not already installed (de-duped by name, so a configured channel that a plugin
+  // also declares counts once, at user scope). In practice the plugin-declared set is empty.
+  const userChans = userChannelNames();
+  const xChannels = [...(plug.channelNames || [])].filter((n) => !userChans.has(n)).length;
   return {
     managed, // {dir, settings, mcpServers, claudeMd} — source objects the m-scope counts read from
     chrome: chromeEnabled, // claude-in-chrome enabled (extension installed + toggle on + onboarded)
@@ -863,13 +908,13 @@ function configCounts(projectDir, addedDirs, currentDir, mainRoot) {
     plugins: pluginsBreakdown(projDir, trusted, managed),
     connectors: connectorsBreakdown(),
     dirs: { l: Array.isArray(addedDirs) ? addedDirs.length : 0 }, // session-added dirs (local-ish)
-    // Plugin-exclusive component types → the "Components" row. x-only except themes, which also
-    // lives in ~/.claude/themes/ (user scope), so it gets a u/x breakdown.
+    // Plugin-bundled component types → the "Components" row. x-only except themes (also in
+    // ~/.claude/themes/) and channels (also in ~/.claude/channels/) — both carry a u/x breakdown.
     lsp: { x: plug.lsp },
     monitors: { x: plug.monitors },
     themes: { u: countFiles(join(HOME, ".claude", "themes"), /\.json$/i), x: plug.themes },
     bin: { x: plug.bin },
-    channels: { x: plug.channels },
+    channels: { u: userChans.size, x: xChannels }, // user-installed (~/.claude/channels) + plugin-declared
   };
 }
 
@@ -1670,10 +1715,6 @@ const hostSegs = [];
   const b = osBadge();
   hostSegs.push(`${b.color}${b.icon}${RESET} ${VAL}${b.label}${RESET}`);
 
-  // Claude Code version sits with the OS here — both are "what's running" — leaving Info. as pure
-  // session/location. (Moved off the Info. row.)
-  if (data.version) hostSegs.push(`${WHITE}${gVersion}${RESET} ${VAL}v${data.version}${RESET}`);
-
   const host = (hostname() || "").split(".")[0]; // drop .local / domain → short hostname
   let user = "";
   try { user = userInfo().username || ""; } catch {}
@@ -1687,7 +1728,9 @@ const outputStyle = data.output_style?.name;
 if (outputStyle && outputStyle !== "default") {
   stateSegs.push(`${PENCIL}${gStyle}${RESET} ${VAL}${outputStyle}${RESET}`);
 }
-// (Claude Code version moved to the Host row, grouped with the OS badge.)
+// Claude Code version — a CLIENT/app version, not a machine attribute, so it belongs on the
+// session/client Info. row (here), not the Host row.
+if (data.version) stateSegs.push(`${WHITE}${gVersion}${RESET} ${VAL}v${data.version}${RESET}`);
 // Vim mode — we render it ourselves and suppress Claude's native "-- INSERT --" via the
 // statusLine.hideVimModeIndicator setting (so the mode isn't shown twice). Modes per the docs:
 // NORMAL, INSERT, VISUAL, VISUAL LINE. INSERT=green (editing), VISUAL*=magenta (selection),
@@ -1739,22 +1782,28 @@ if (acc.toolCalls > 0) {
 
 const agents = agentStatus(transcript, data.transcript_path);
 if (agents) {
-  // Icon-forward, no filler words: the robot glyph already means "agent". Running and done are
-  // counted SEPARATELY and shown together — the focused active agent (with its own [done/total] if
-  // it keeps a task list), a +N for any other running agents, and a green ✔N tally of completed
-  // ones. Robot is cyan while anything runs, dimming to gray once all agents have finished.
+  // Counts-only roll-up — the subagent panel below the prompt already renders each agent's name +
+  // description verbatim, so the dashboard deliberately does NOT repeat them. It surfaces only what
+  // the panel can't: how many are running, their COMBINED [done/total] task progress (summed across
+  // active agents that keep a task list), and a green ✔N tally of completed ones (which the panel
+  // drops as its rows finish). Robot is cyan while anything runs, dimming to gray once all finish.
   const segs = [];
   if (agents.active.length > 0) {
-    const a = agents.active[0];
-    const desc = a.description ? `: ${truncate(a.description, 24)}` : "";
-    const prog = a.tasks ? ` ${CYAN}[${a.tasks.completed}/${a.tasks.total}]${RESET}` : ""; // that agent's OWN tasks
-    const more = agents.active.length > 1 ? ` ${SOFT}+${agents.active.length - 1}${RESET}` : "";
-    segs.push(`${VAL}${a.name}${RESET}${desc}${prog}${more}`);
+    let done = 0;
+    let total = 0;
+    for (const a of agents.active) {
+      if (a.tasks) {
+        done += a.tasks.completed;
+        total += a.tasks.total;
+      }
+    }
+    const prog = total > 0 ? ` ${CYAN}[${done}/${total}]${RESET}` : "";
+    segs.push(`${VAL}${agents.active.length} running${RESET}${prog}`);
   }
   if (agents.completed > 0) segs.push(`${GREEN}${gCheck} ${agents.completed}${RESET}`);
   if (segs.length > 0) {
     const robot = agents.active.length > 0 ? CYAN : SOFT;
-    activitySegs.push(`${robot}${gAgent}${RESET} ${segs.join(" ")}`);
+    activitySegs.push(`${robot}${gAgent}${RESET} ${segs.join(` ${SOFT}·${RESET} `)}`);
   }
 }
 
@@ -1846,6 +1895,7 @@ const counts = displayRoot
         join(HOME, ".claude", "rules"),
         join(HOME, ".claude", "output-styles"),
         join(HOME, ".claude", "themes"), // user color themes (Components row)
+        join(HOME, ".claude", "channels"), // user-installed message channels (Exts. row)
         join(HOME, ".claude", "CLAUDE.md"), // user-scope memory (doc)
         join(managedDir(), "managed-settings.json"), // enterprise/managed scope (hooks, claudeMd)
         join(managedDir(), "managed-mcp.json"), // enterprise/managed MCP
@@ -1861,7 +1911,7 @@ const counts = displayRoot
 // (CLAUDE.md/AGENTS.md) only inside a repo; global items (hooks/plugins/global dirs) show
 // whenever present — they're active regardless of whether the cwd is a git repo.
 const configSegs = [];
-const componentSegs = []; // the "Components" row — plugin-exclusive types, shown only when present
+const componentSegs = []; // the "Exts." row — plugin-exclusive component types, shown only when present
 if (counts) {
   // "[icon] total (m/u/p/l/x)" — dim breakdown for every multi-scope item (breakdown:true) when
   // total>0. FIXED 5 columns, positions NEVER shift, broad→narrow: MANAGED / USER / PROJECT /
@@ -1877,11 +1927,15 @@ if (counts) {
   const SCOPES = ["m", "u", "p", "l", "x"];
   const total = (c) => (c.m || 0) + (c.u || 0) + (c.p || 0) + (c.l || 0) + (c.x || 0);
   const seg = (head, c, { color = SOFT, breakdown = false, caps = "" } = {}) => {
-    const tail =
-      breakdown && total(c) > 0
-        ? ` ${DIM}(${SCOPES.map((k) => (caps.includes(k) ? c[k] || 0 : "-")).join("/")})${RESET}`
-        : "";
-    return `${color}${head}${RESET} ${total(c) > 0 ? GREEN : SOFT}${total(c)}${RESET}${tail}`;
+    const base = `${color}${head}${RESET} ${total(c) > 0 ? GREEN : SOFT}${total(c)}${RESET}`;
+    if (breakdown && total(c) > 0) {
+      const tail = ` ${DIM}(${SCOPES.map((k) => (caps.includes(k) ? c[k] || 0 : "-")).join("/")})${RESET}`;
+      // Two alts (widest-first), so packSection DROPS the (m/u/p/l/x) scope breakdown to reclaim
+      // width before it has to ellipsis-truncate the row — every item's count stays visible; only
+      // the per-scope detail goes, and only on rows that would otherwise overflow.
+      return { alts: [base + tail, base] };
+    }
+    return base; // plain item (no breakdown): a single form, nothing to drop
   };
   // Every config widget renders its icon + count (0 included) so an empty category shows at a
   // glance; the breakdown parens appear only once total>0 (an all-0/"-" breakdown is just noise).
@@ -1913,22 +1967,33 @@ if (counts) {
   show(gCfgTheme, counts.themes, { color: c256(213), breakdown: true, caps: "ux" }); // orchid
   show(gCfgDirs, counts.dirs, { color: c256(250) }); // silver — session-added dirs
 
-  // Components row — plugin-exclusive component types (ALL x-scope only) that have no home on the
-  // Config row. Every widget always renders (0 included), consistent with the Config row, so an
-  // empty category shows at a glance. Being x-only, none show breakdown parens (same as
-  // connectors/chrome/dirs). (Themes is NOT here — it also has a user scope, so it lives on Config.)
+  // Exts. row — plugin-bundled component types that have no home on the Config row. Every widget
+  // always renders (0 included), consistent with the Config row, so an empty category shows at a
+  // glance. lsp/monitors/bin are x-only (no breakdown parens, like connectors/chrome/dirs); channels
+  // is the exception — a channel can be installed at USER scope (~/.claude/channels/) OR declared by
+  // a plugin, so it carries a u/x breakdown. (Themes is NOT here — it also has a user scope, so it
+  // lives on the Config row.)
   const showC = (head, c, opts) => componentSegs.push(seg(head, c, opts));
   showC(gCfgLsp, counts.lsp, { color: c256(81) }); // light blue
   showC(gCfgMonitor, counts.monitors, { color: c256(209) }); // salmon
   showC(gCfgBin, counts.bin, { color: c256(108) }); // sage
-  showC(gCfgChannel, counts.channels, { color: c256(116) }); // sky
+  showC(gCfgChannel, counts.channels, { color: c256(116), breakdown: true, caps: "ux" }); // sky — user-installed + plugin
 }
 
 // Width-aware reflow. Claude Code sets COLUMNS in recent versions. statusLine.padding indents
-// the whole line right by N chars (applied by CC's renderer, OUTSIDE our output), so it eats
-// into usable width — subtract it or wide rows overflow past COLUMNS and hard-wrap to col 0.
+// the whole line right by N chars (applied by CC's renderer, OUTSIDE our output), so it eats into
+// usable width — subtract it. We also reserve a 2-cell cushion (not 1): glyph display-width is only
+// ESTIMATED (vlen/isWide guesses Nerd-Font cell widths), so a font whose glyphs render wider than the
+// guess can push a row past the real edge — the TERMINAL then hard-wraps it into an extra physical
+// row Claude Code never counted → height desync (footer/input drawn in the wrong place). The cushion
+// lets packSection wrap proactively (a line CC counts) before the terminal wraps one (which it doesn't).
 const padding = readPositiveInt(settings.statusLine?.padding, 0);
-const width = (parseInt(process.env.COLUMNS, 10) || 1e9) - 1 - padding;
+// Width source, in order: COLUMNS env (set by recent Claude Code) → the TTY's own column count →
+// 80. The finite 80 fallback is load-bearing for any host that DOESN'T export COLUMNS (e.g. when the
+// statusline's stdout is piped rather than a TTY). The old `|| 1e9` made width ~1e9 there, so NOTHING
+// wrapped or truncated — rows ran long, the real terminal hard-wrapped them back to col 0, and the
+// overflow painted over the reply. A finite fallback keeps reflow conservative instead of overflowing.
+const width = (parseInt(process.env.COLUMNS, 10) || process.stdout.columns || 80) - 2 - padding;
 // Strip SGR color codes AND OSC 8 hyperlink sequences (the open `ESC]8;;URL BEL` and the close
 // `ESC]8;;BEL`), so width math counts only visible glyphs. OSC 8 ends with BEL (\x07) or ST (ESC \).
 const stripAnsi = (s) =>
@@ -1990,9 +2055,15 @@ const toItems = (segments) =>
 const SECTION_WIDTH = 8;
 const SEP = " | ";
 
-// `lead` is rendered once after the label (e.g. the clock on the limits row). `leadWidth` is its
-// TRUE rendered cell-width (icons here don't always match vlen's guess), used so continuation
-// lines indent PAST it and wrapped items align text-under-text, not under the lead's icon.
+// `lead` is rendered once after the label (e.g. the gauge glyph on the Limits row). `leadWidth` is
+// accepted for call-site compatibility but no longer used (it used to indent continuation lines,
+// which no longer exist — see below).
+//
+// FIXED-HEIGHT, NO-WRAP: each non-empty section is emitted as EXACTLY ONE line, ellipsis-truncated
+// if it overflows — never spilling onto continuation lines. This keeps the dashboard's TOTAL line
+// count independent of terminal width: a resize can no longer add or remove rows, so Claude Code's
+// "clear N lines then repaint" always matches the real height and old frames stop stacking when you
+// resize the window. (Trade-off: on a narrow pane the tail of a row is truncated, not wrapped.)
 function packSection(label, segments, lead = "", leadWidth = null) {
   if (!segments.length) return [];
 
@@ -2001,67 +2072,57 @@ function packSection(label, segments, lead = "", leadWidth = null) {
   const labelCap = label.charAt(0).toUpperCase() + label.slice(1);
   const prefixPlain = labelCap.padEnd(SECTION_WIDTH);
   const prefix = `${BOLD}${ITALIC}${SOFT}${prefixPlain}${RESET} ${lead}`;
-  // U+2800 (Braille blank) renders blank but is NOT whitespace, so Claude Code's per-line
-  // leading-whitespace strip leaves it intact — keeps wrapped rows aligned under the content.
-  const indentWidth = SECTION_WIDTH + 1 + (leadWidth ?? vlen(lead));
-  const indent = cp(0x2800).repeat(indentWidth);
-  const maxItemWidth = width - indentWidth; // widest an item can be on its own line
 
-  // A usage bar is a one-row luxury: show every item's WIDEST (bar) form only when the whole
-  // section fits on a single row. The moment it would wrap, drop to each item's narrowest
-  // (no-bar) form. Plain single-alt items are identical either way. Same rule everywhere.
+  // Bars are a single-line luxury: use each item's WIDEST (with-bar) form only if the whole section
+  // fits on one line; otherwise drop to its narrowest (no-bar) form to buy space before truncating.
+  // Plain single-alt items are identical either way.
   const fullForms = items.map((it) => it.alts[0]);
   const oneRow = vlen(prefix) + fullForms.reduce((w, f) => w + vlen(f), 0) + (items.length - 1) * SEP.length;
   const forms = oneRow <= width ? fullForms : items.map((it) => it.alts[it.alts.length - 1]);
 
-  const rows = [];
-  let cur = prefix;
-  let curLen = vlen(prefix);
-  let placed = 0;
-
-  for (let i = 0; i < items.length; i++) {
-    let form = forms[i];
-    // Only plain single-alt items may be ellipsis-truncated; gauges keep their narrowest form.
-    if (items[i].alts.length === 1 && vlen(form) > maxItemWidth) form = truncateVisible(form, maxItemWidth);
-    const formLen = vlen(form);
-
-    if (placed > 0 && curLen + SEP.length + formLen > width) {
-      // Out of room: keep a trailing " |" on the finished line as a continuation marker (dropping
-      // it silently reads as confusing), then start an aligned continuation line.
-      const marker = curLen + 2 <= width ? ` ${SOFT}|${RESET}` : "";
-      rows.push(cur + marker);
-      cur = indent + form;
-      curLen = indentWidth + formLen;
-    } else {
-      cur += (placed > 0 ? SEP : "") + form;
-      curLen += (placed > 0 ? SEP.length : 0) + formLen;
-    }
-    placed++;
-  }
-
-  rows.push(cur);
-  return rows;
+  // One line. Truncate (ANSI/OSC-balanced) to width only if it still overflows after dropping bars.
+  const line = prefix + forms.join(SEP);
+  return [vlen(line) > width ? truncateVisible(line, width) : line];
 }
 
-const rows = [
+// One ENTRY PER SECTION (each packSection emits exactly 0 or 1 line — fixed-height, no wrap). Built
+// as a slot list so the row budget is the SECTION COUNT, a constant, rather than "however many
+// sections happen to be non-empty this render".
+const sections = [
   // Label ≠ var name for a few (renamed for clearer categories): session→Model, rate→Usage,
   // work→Repo. Vars kept to limit churn.
-  ...packSection("model", sessionSegs),
-  ...packSection("limits", quotaSegs, limitLead, limitLeadW),
-  ...packSection("usage", rateSegs),
-  ...packSection("turn", turnSegs),
-  ...packSection("activity", activitySegs),
-  ...packSection("repo", locSegs),
-  ...packSection("config", configSegs),
-  ...packSection("components", componentSegs),
-  ...packSection("host", hostSegs),
+  packSection("model", sessionSegs),
+  packSection("limits", quotaSegs, limitLead, limitLeadW),
+  packSection("usage", rateSegs),
+  packSection("turn", turnSegs),
+  packSection("activity", activitySegs),
+  packSection("repo", locSegs),
+  packSection("config", configSegs),
+  packSection("exts.", componentSegs),
+  packSection("host", hostSegs),
   // "Info." row LAST — nearest the prompt. Leads with the CWD (always-present location anchor — the
   // Repo row above is repo-only now), then vim mode (where CC's native "-- INSERT --" used to sit),
-  // output-style, agent name, and session id. (Version moved to the Host row.)
-  ...packSection("info.", stateSegs),
-].filter(Boolean);
+  // output-style, version, agent name, and session id.
+  packSection("info.", stateSegs),
+];
 
-// One blank line below the dashboard (gap before the prompt). A bare trailing "\n" gets trimmed
-// by Claude Code (it strips empty/whitespace rows), so emit a final row holding a single U+2800
-// (Braille blank) — invisible but non-empty, so it survives as a real, blank-looking row.
-process.stdout.write(rows.join("\n") + "\n" + cp(0x2800));
+// CONSTANT HEIGHT — the load-bearing invariant. The dashboard ALWAYS emits the same number of lines,
+// independent of BOTH width (each section is one no-wrap line, fixed earlier) AND content (missing
+// sections are backfilled here). Claude Code reserves vertical space by the line count of the PREVIOUS
+// render, then clears that many and repaints; if our count DROPS between renders the old frame's extra
+// rows aren't cleared and STACK. The worst offender is /clear — it wipes the Turn + Activity rows at
+// once (e.g. 10 lines → 8) → CC under-clears → 2 ghost rows pile up on every /clear. Pinning the count
+// to the section total (one slot per section, empty slots padded) means /clear, cd-out-of-a-repo, a
+// todo finishing, a gauge appearing, etc. can no longer change the height — so nothing can stack.
+// (This completes the width-stability fix in fc7cbba; together they make height invariant to both axes.)
+const blank = cp(0x2800); // U+2800: non-whitespace, so CC's trailing-blank-row strip preserves it
+const contentRows = sections.flat().filter(Boolean); // the non-empty section lines, in order
+const HEIGHT = sections.length; // one row-slot per section — the fixed line budget
+// Content packs to the TOP; blank slots backfill to HEIGHT so the gap rides at the BOTTOM (above the
+// prompt) instead of opening holes mid-dashboard. After /clear you briefly see that gap where Turn +
+// Activity were; it heals as soon as you resume work and those rows return — height never changes.
+const rows = contentRows.concat(Array(Math.max(0, HEIGHT - contentRows.length)).fill(blank));
+
+// One trailing blank gap row above the prompt → total is ALWAYS HEIGHT + 1 lines. (It also guarantees
+// a gap even when every slot is filled, i.e. there's nothing to backfill.)
+process.stdout.write(rows.join("\n") + "\n" + blank);

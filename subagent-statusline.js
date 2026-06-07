@@ -135,7 +135,10 @@ function renderRow(task, cols) {
   const name = String(task.name || task.type || "agent");
   const st = statusStyle(normalizeStatus(task.status));
   const sep = ` ${DIM}·${RESET} `;
-  const parts = [`${st.color}${gAgent}${RESET} ${BOLD}${name}${RESET}`];
+  // Glyph stays a stable brand cyan (matching the main dashboard's agent widget); the trailing
+  // status glyph below — not the icon — carries running/done/error color, so the agent's identity
+  // icon doesn't flicker yellow/green/red as its status changes.
+  const parts = [`${CYAN}${gAgent}${RESET} ${BOLD}${name}${RESET}`];
   if (task.description) parts.push(`${SOFT}${truncate(task.description, 40)}${RESET}`);
   parts.push(`${st.color}${st.glyph}${RESET}`);
   const tok = Number(task.tokenCount) || 0;

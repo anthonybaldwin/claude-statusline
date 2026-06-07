@@ -37,9 +37,9 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   same as Config): LSP servers, background monitors, `bin/` executables, and message channels.
   Counts include components declared inline in a plugin's **marketplace entry**, not just in the
   plugin's own files (which is how the official LSP plugins ship them).
-- **Host** — local clock, OS badge with real version, Claude Code version, and `user@host`.
+- **Host** — local clock, OS badge with real version, and `user@host`.
 - **Info.** — current directory (home-relativized, leaf preserved when long), vim mode,
-  output style, agent name, and the session id (for `claude --resume`).
+  output style, Claude Code version, agent name, and the session id (for `claude --resume`).
 
 ## Requirements
 
