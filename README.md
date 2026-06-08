@@ -1,3 +1,21 @@
+```
+// Pin to 2.1.162 to avoid TUI cursor/statusline corruption
+
+// Remove this + un-pin once fixed. Tracking:
+//   https://github.com/anthropics/claude-code/issues/66013
+//   https://github.com/anthropics/claude-code/issues/65989
+
+"env": {
+    "DISABLE_AUTOUPDATER": "1"
+  }
+```
+
+```
+claude install 2.1.162
+```
+
+---
+
 # claude-statusline
 
 A cross-platform [Claude Code](https://claude.com/claude-code) [status line](https://code.claude.com/docs/en/statusline) — context, cost,
