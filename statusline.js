@@ -36,15 +36,6 @@ const TRACK = `${esc}[48;5;238m`; // empty-bar track — a DARK but visible cont
 const BARLO = `${esc}[38;5;246m`;
 const RESET = `${esc}[0m`;
 const c256 = (n) => `${esc}[38;5;${n}m`; // 256-color foreground helper (config-row icon colors)
-const BEL = "\x07";
-
-// OSC 8 hyperlinks (Cmd/Ctrl-click). ON by default; opt out with CLAUDE_STATUSLINE_HYPERLINKS=0.
-// Conformant terminals that lack support render the plain text (non-clickable); the few setups that
-// leak the raw escape (some tmux/ssh configs) can disable it. Emits BEL-terminated OSC 8 (the form
-// the docs use); stripAnsi/truncateVisible below are taught to treat these sequences as zero-width.
-const HYPERLINKS = process.env.CLAUDE_STATUSLINE_HYPERLINKS !== "0";
-const hlink = (text, url) =>
-  HYPERLINKS && url ? `${esc}]8;;${url}${BEL}${text}${esc}]8;;${BEL}` : text;
 
 // Nerd Font glyphs only. Use fromCodePoint for symbols above U+FFFF.
 const cp = (n) => String.fromCodePoint(n);
@@ -1823,13 +1814,8 @@ if (linesAdded > 0 || linesRemoved > 0) {
 // a repo locSegs stays empty → packSection emits nothing and the whole row disappears.
 const locSegs = [];
 if (inRepo) {
-  // workspace.repo {host,owner,name} comes from the origin remote (absent without one). It's the
-  // single source for the GitHub-style URLs the headline/PR/tag hyperlinks point at. The DISPLAY
-  // text stays the folder basename (stable, matches your mental model); only the link comes from here.
-  const repo = data.workspace?.repo;
-  const repoBase =
-    repo?.host && repo?.owner && repo?.name ? `https://${repo.host}/${repo.owner}/${repo.name}` : "";
-  locSegs.push(`${BBLUE}${gTree}${RESET} ${VAL}${hlink(dirName, repoBase)}${RESET}`);
+  // Headline project name is the folder basename (stable, matches your mental model).
+  locSegs.push(`${BBLUE}${gTree}${RESET} ${VAL}${dirName}${RESET}`);
   if (worktree) locSegs.push(`${MAGENTA}${gTree}${RESET} ${VAL}${worktree}${RESET}`);
   locSegs.push(`${CYAN}${gBranch}${RESET} ${gitStr}`);
   // PR — the current branch's OPEN pull request, straight from Claude Code's native `pr` payload
@@ -1853,16 +1839,11 @@ if (inRepo) {
     else if (rs.includes("pending") || rs.includes("review") || rs.includes("required")) { prColor = YELLOW; mark = ` ${YELLOW}●${RESET}`; }
     const label = prData.number != null ? `#${prData.number}` : "PR";
     const extra = prList.length > 1 ? ` ${SOFT}+${prList.length - 1}${RESET}` : "";
-    // pr.url makes our badge Cmd/Ctrl-clickable (CC's native footer badge already is; near-free here).
-    locSegs.push(`${MAGENTA}${gPR}${RESET} ${prColor}${hlink(label, prData.url)}${RESET}${mark}${extra}`);
+    locSegs.push(`${MAGENTA}${gPR}${RESET} ${prColor}${label}${RESET}${mark}${extra}`);
   }
   if (tagInfo) {
     const tagSuffix = tagInfo.count > 0 ? `${YELLOW}+${tagInfo.count}${RESET}` : "";
-    // Tag → release page. The /releases/tag/ path is GitHub-specific, so only link on github hosts;
-    // other forges still get the plain tag text.
-    const tagUrl =
-      repoBase && /github/i.test(repo.host) ? `${repoBase}/releases/tag/${tagInfo.tag}` : "";
-    locSegs.push(`${MAGENTA}${gTag}${RESET} ${VAL}${hlink(tagInfo.tag, tagUrl)}${RESET}${tagSuffix}`);
+    locSegs.push(`${MAGENTA}${gTag}${RESET} ${VAL}${tagInfo.tag}${RESET}${tagSuffix}`);
   }
 }
 
@@ -1994,10 +1975,8 @@ const padding = readPositiveInt(settings.statusLine?.padding, 0);
 // wrapped or truncated — rows ran long, the real terminal hard-wrapped them back to col 0, and the
 // overflow painted over the reply. A finite fallback keeps reflow conservative instead of overflowing.
 const width = (parseInt(process.env.COLUMNS, 10) || process.stdout.columns || 80) - 2 - padding;
-// Strip SGR color codes AND OSC 8 hyperlink sequences (the open `ESC]8;;URL BEL` and the close
-// `ESC]8;;BEL`), so width math counts only visible glyphs. OSC 8 ends with BEL (\x07) or ST (ESC \).
-const stripAnsi = (s) =>
-  s.replace(/\x1b\[[0-9;]*m/g, "").replace(/\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/g, "");
+// Strip SGR color codes so width math counts only visible glyphs.
+const stripAnsi = (s) => s.replace(/\x1b\[[0-9;]*m/g, "");
 const isWide = (codePoint) =>
   (codePoint >= 0xe000 && codePoint <= 0xf8ff) ||
   (codePoint >= 0xf0000 && codePoint <= 0xffffd) ||
@@ -2016,21 +1995,12 @@ const truncateVisible = (s, maxVisible) => {
   let out = "";
   let visible = 0;
   let i = 0;
-  let linkOpen = false; // inside an OSC 8 hyperlink, so a mid-link break can be balanced
   while (i < s.length) {
     if (s[i] === "\x1b") {
       const sgr = /^\x1b\[[0-9;]*m/.exec(s.slice(i));
       if (sgr) {
         out += sgr[0];
         i += sgr[0].length;
-        continue;
-      }
-      // OSC 8 open/close are zero-width: copy through untouched, never split.
-      const osc = /^\x1b\]8;[^\x07\x1b]*(?:\x07|\x1b\\)/.exec(s.slice(i));
-      if (osc) {
-        out += osc[0];
-        linkOpen = !/^\x1b\]8;;(?:\x07|\x1b\\)$/.test(osc[0]); // a close has nothing between ;; and the terminator
-        i += osc[0].length;
         continue;
       }
     }
@@ -2042,7 +2012,6 @@ const truncateVisible = (s, maxVisible) => {
     visible += w;
     i += chLen;
   }
-  if (linkOpen) out += `${esc}]8;;${BEL}`; // close a hyperlink left open by the truncation point
   return `${out}…${RESET}`;
 };
 
@@ -2080,7 +2049,7 @@ function packSection(label, segments, lead = "", leadWidth = null) {
   const oneRow = vlen(prefix) + fullForms.reduce((w, f) => w + vlen(f), 0) + (items.length - 1) * SEP.length;
   const forms = oneRow <= width ? fullForms : items.map((it) => it.alts[it.alts.length - 1]);
 
-  // One line. Truncate (ANSI/OSC-balanced) to width only if it still overflows after dropping bars.
+  // One line. Truncate (ANSI-balanced) to width only if it still overflows after dropping bars.
   const line = prefix + forms.join(SEP);
   return [vlen(line) > width ? truncateVisible(line, width) : line];
 }

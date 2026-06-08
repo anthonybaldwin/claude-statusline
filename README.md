@@ -26,8 +26,7 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   volume (+added / −removed lines).
 - **Repo** — *(only inside a git repo)* project name, worktree, branch with ahead/behind and
   staged/modified/untracked/conflict counts, the current branch's open PR (colored by review
-  state), and the latest `v*` tag with commits-since. The project name, PR, and tag are
-  clickable (OSC 8) when `workspace.repo` is available — Cmd/Ctrl-click to open on the host.
+  state), and the latest `v*` tag with commits-since.
 - **Config** — what's actually loaded, each broken down by Claude Code's real config scopes
   **(managed / user / project / local / plugin)**, de-duped by precedence and gated on workspace
   trust: CLAUDE.md memory, agents, commands, skills (incl. output-styles), rules, MCP servers,
@@ -118,7 +117,6 @@ A couple of optional environment variables:
 | --- | --- | --- |
 | `CLAUDE_STATUSLINE_TRANSCRIPT_BYTES` | `1048576` (1 MiB) | How many trailing bytes of the transcript to parse per render. |
 | `CLAUDE_STATUSLINE_MANAGED_DIR` | platform default | Override the enterprise/managed config dir (for testing/relocation). |
-| `CLAUDE_STATUSLINE_HYPERLINKS` | `1` (on) | Set to `0` to disable OSC 8 hyperlinks (repo / PR / tag). Links degrade to plain text on terminals that ignore OSC 8; disable it if yours leaks the raw escape (some tmux/SSH setups). |
 
 It also honors a few `~/.claude/settings.json` keys when present: `effortLevel`, `fastMode`,
 and the `statusLine.padding` / `statusLine.refreshInterval` shown above.
