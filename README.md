@@ -48,30 +48,6 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
 - A terminal with **truecolor (24-bit)** support for the smoothest effort-level gradients
   (256-color still looks fine).
 
-## 🐛🩹 "Statusline clobbering w/ Claude output + cursor not in input"
-
-Disable autoupdates until resolved:
-```
-"env": {
-    "DISABLE_AUTOUPDATER": "1"
-  }
-```
-
-```
-claude install 2.1.162
-```
-
-optional/unrelated, this env. is also nice:
-```
-"CLAUDE_CODE_NO_FLICKER": "1"
-```
-
-At least:
-
-- https://github.com/anthropics/claude-code/issues/66013
-- https://github.com/anthropics/claude-code/issues/65989
-
-
 ## Install
 
 Clone it anywhere you like:
