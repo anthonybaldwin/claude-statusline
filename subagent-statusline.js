@@ -130,6 +130,10 @@ function statusStyle(s) {
   }
 }
 
+// Names Claude Code assigns to plain (non-specialized) agents — not real identities, so hide them
+// and let the description carry the row.
+const GENERIC_NAMES = new Set(["internal_agent", "local_agent", "agent"]);
+
 // Row body: [robot] name · dim description · [status glyph] · NNk tok — clamped to the row width.
 function renderRow(task, cols) {
   const name = String(task.name || task.type || "agent");
@@ -138,8 +142,11 @@ function renderRow(task, cols) {
   // Glyph stays a stable brand cyan (matching the main dashboard's agent widget); the trailing
   // status glyph below — not the icon — carries running/done/error color, so the agent's identity
   // icon doesn't flicker yellow/green/red as its status changes.
-  const parts = [`${CYAN}${gAgent}${RESET} ${BOLD}${name}${RESET}`];
-  if (task.description) parts.push(`${SOFT}${truncate(task.description, 40)}${RESET}`);
+  const showName = !GENERIC_NAMES.has(name) || !task.description;
+  const parts = showName
+    ? [`${CYAN}${gAgent}${RESET} ${BOLD}${name}${RESET}`]
+    : [`${CYAN}${gAgent}${RESET} ${SOFT}${truncate(task.description, 56)}${RESET}`];
+  if (showName && task.description) parts.push(`${SOFT}${truncate(task.description, 40)}${RESET}`);
   parts.push(`${st.color}${st.glyph}${RESET}`);
   const tok = Number(task.tokenCount) || 0;
   if (tok > 0) parts.push(`${SOFT}${formatTokens(tok)} tok${RESET}`);
