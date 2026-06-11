@@ -1,7 +1,13 @@
 > [!IMPORTANT]
-> **Known issue: statusline text clobbering & mouse cursor jumping**
+> **Known issue: statusline/UI clobbering & input cursor jumping**
 >
-> If the statusline garbles other terminal text or your mouse cursor keeps moving on its own, this is a regression in recent Claude Code builds — not the plugin. Tracking (at least): anthropics/claude-code#66013 and anthropics/claude-code#65989. Downgrade Claude Code to **`2.1.162`** (`claude install 2.1.162`) or live with and use `CTRL+L` to clear. Pinning at 2.1.162 means no Fable.
+> If the statusline and other UI duplicate or stack on screen, or your terminal cursor is often positioned incorrectly, this is a regression in recent Claude Code builds — not the plugin. Multi-line statuslines and wide terminals are common triggers. Tracking (at least): anthropics/claude-code#66013 and anthropics/claude-code#65989.
+>
+> **Options:**
+> - **Downgrade** to **`2.1.162`** (`claude install 2.1.162`) — the last good version (`2.1.163`+ are affected).
+> - Or **live with it** and hit **`CTRL+L`** to repaint when it gets messy — note it only clears momentarily, then re-accrues.
+>
+> Pinning at `2.1.162` means no Fable.
 
 # claude-statusline
 
