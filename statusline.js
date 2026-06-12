@@ -2028,16 +2028,18 @@ const SEP = " | ";
 // TRUE rendered cell-width (icons here don't always match vlen's guess), used so continuation
 // lines indent PAST it and wrapped items align text-under-text, not under the lead's icon.
 //
-// DETAIL-PREFERRED LAYOUT: lay out each item's WIDEST form (bars + scope-breakdown parens) and
-// wrap as needed. If the widest layout fits in ≤`detailRows`, keep it. Otherwise drop everything to
-// its NARROWEST alt (no bars, no breakdown parens) to reclaim space, then re-wrap.
-// `detailRows` default is 1 — for gauge rows (Model/Limits/Usage) one row of compact forms reads
-// better than two rows with bars. The Config row passes 2 so its scope-breakdown parens get a
-// second indented line at typical widths instead of being dropped to bare counts.
+// GREEDY PER-ITEM LAYOUT. Walk items left-to-right, placing each at:
+//   1. WIDEST form on current row, if it fits.
+//   2. else NARROWEST form on current row, if it fits.
+//   3. else wrap to a fresh row, place WIDEST form there (empty row → plenty of space).
+// So an item only goes compact when it has to SHARE a tight row; an item that wraps onto a near-
+// empty continuation line gets its detailed form back. The previous "all-widest or all-narrowest"
+// global choice meant a tail item that wrapped came along in its compact form even though the wrap
+// row had room for the bar/breakdown — this fixes that.
 // (NOTE: between fc7cbba and the 2026-06-12 revert, packSection was fixed-height / truncate-only to
 // dodge a Claude Code resize-stacking under-clear; that bug was fixed upstream in CC v2.1.170, so
 // wrapping is back. Multi-row sections still trigger the under-clear on PRE-2.1.170 CC versions.)
-function packSection(label, segments, lead = "", leadWidth = null, detailRows = 1) {
+function packSection(label, segments, lead = "", leadWidth = null) {
   if (!segments.length) return [];
 
   const items = toItems(segments);
@@ -2051,39 +2053,54 @@ function packSection(label, segments, lead = "", leadWidth = null, detailRows = 
   const indent = cp(0x2800).repeat(indentWidth);
   const maxItemWidth = width - indentWidth; // widest an item can be on its own line
 
-  // Lay forms out into wrapped rows. Returns the full row strings (with trailing " |" continuation
-  // markers); the caller uses .length as the row count to decide which form-set to commit to.
-  const layout = (forms) => {
-    const rows = [];
-    let cur = prefix;
-    let curLen = vlen(prefix);
-    let placed = 0;
-    for (let i = 0; i < items.length; i++) {
-      let form = forms[i];
-      // Only plain single-alt items may be ellipsis-truncated; gauges keep their narrowest form.
-      if (items[i].alts.length === 1 && vlen(form) > maxItemWidth) form = truncateVisible(form, maxItemWidth);
-      const formLen = vlen(form);
-      if (placed > 0 && curLen + SEP.length + formLen > width) {
-        // Out of room: keep a trailing " |" on the finished line as a continuation marker (dropping
-        // it silently reads as confusing), then start an aligned continuation line.
+  const rows = [];
+  let cur = prefix;
+  let curLen = vlen(prefix);
+  let placed = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const wide = it.alts[0];
+    const narrow = it.alts[it.alts.length - 1];
+    const wideLen = vlen(wide);
+    const narrowLen = vlen(narrow);
+    const sepLen = placed > 0 ? SEP.length : 0;
+
+    // Try widest, then narrowest, on the current row.
+    if (curLen + sepLen + wideLen <= width) {
+      cur += (placed > 0 ? SEP : "") + wide;
+      curLen += sepLen + wideLen;
+    } else if (placed > 0 && curLen + sepLen + narrowLen <= width) {
+      cur += SEP + narrow;
+      curLen += sepLen + narrowLen;
+    } else {
+      // Wrap. Place widest on the new row; only if widest itself overflows do we degrade — to
+      // narrow if it fits, else truncate (single-alt items only).
+      if (placed > 0) {
+        // Trailing " |" continuation marker on the finished line (dropping it silently reads as
+        // confusing). Skip if even the marker won't fit.
         const marker = curLen + 2 <= width ? ` ${SOFT}|${RESET}` : "";
         rows.push(cur + marker);
-        cur = indent + form;
-        curLen = indentWidth + formLen;
-      } else {
-        cur += (placed > 0 ? SEP : "") + form;
-        curLen += (placed > 0 ? SEP.length : 0) + formLen;
       }
-      placed++;
+      let form = wide;
+      let formLen = wideLen;
+      if (indentWidth + formLen > width) {
+        if (indentWidth + narrowLen <= width) {
+          form = narrow;
+          formLen = narrowLen;
+        } else if (it.alts.length === 1) {
+          form = truncateVisible(form, maxItemWidth);
+          formLen = vlen(form);
+        }
+      }
+      cur = indent + form;
+      curLen = indentWidth + formLen;
     }
-    rows.push(cur);
-    return rows;
-  };
+    placed++;
+  }
 
-  // Try widest first; if it fits in ≤detailRows rows, keep the detail. Otherwise drop to narrowest.
-  const wide = layout(items.map((it) => it.alts[0]));
-  if (wide.length <= detailRows) return wide;
-  return layout(items.map((it) => it.alts[it.alts.length - 1]));
+  rows.push(cur);
+  return rows;
 }
 
 // One ENTRY PER SECTION; each packSection emits 0, 1, or (when the row is too wide even after
@@ -2099,7 +2116,7 @@ const sections = [
   packSection("turn", turnSegs),
   packSection("activity", activitySegs),
   packSection("repo", locSegs),
-  packSection("config", configSegs, "", null, 2), // 2-row detail budget: keep scope-breakdown parens visible on a 2nd indented line at typical widths
+  packSection("config", configSegs),
   packSection("exts.", componentSegs),
   packSection("host", hostSegs),
   // "Info." row LAST — nearest the prompt. Leads with the CWD (always-present location anchor — the
