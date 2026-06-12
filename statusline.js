@@ -2028,18 +2028,21 @@ const SEP = " | ";
 // TRUE rendered cell-width (icons here don't always match vlen's guess), used so continuation
 // lines indent PAST it and wrapped items align text-under-text, not under the lead's icon.
 //
-// GREEDY PER-ITEM LAYOUT. Walk items left-to-right, placing each at:
-//   1. WIDEST form on current row, if it fits.
-//   2. else NARROWEST form on current row, if it fits.
-//   3. else wrap to a fresh row, place WIDEST form there (empty row → plenty of space).
-// So an item only goes compact when it has to SHARE a tight row; an item that wraps onto a near-
-// empty continuation line gets its detailed form back. The previous "all-widest or all-narrowest"
-// global choice meant a tail item that wrapped came along in its compact form even though the wrap
-// row had room for the bar/breakdown — this fixes that.
+// LAYOUT POLICY: two passes, with the second skipped for detail-preferring sections.
+//   1. All-widest on one line — fast path, used by every section when there's room.
+//   2. (compact-first sections only) All-narrowest on one line — gauge rows (Model/Limits/Usage)
+//      prefer fitting compactly on a single row over wrapping with bars. Bars are decorative; the
+//      numbers are the signal, so one tight row beats two with bar art.
+//   3. GREEDY PER-ITEM wrap — each item tries widest, then narrowest on the current row, then wraps
+//      to a fresh row with its widest form (an empty wrap row has room for detail). Used by Config
+//      always, and by gauge rows when even all-narrowest won't fit one line.
+// `preferDetail` (default false) flips off the all-narrowest one-line pass. The Config row passes
+// true so its (m/u/p/l/x) breakdowns stay attached to items that wrap, instead of the whole row
+// collapsing to bare counts.
 // (NOTE: between fc7cbba and the 2026-06-12 revert, packSection was fixed-height / truncate-only to
 // dodge a Claude Code resize-stacking under-clear; that bug was fixed upstream in CC v2.1.170, so
 // wrapping is back. Multi-row sections still trigger the under-clear on PRE-2.1.170 CC versions.)
-function packSection(label, segments, lead = "", leadWidth = null) {
+function packSection(label, segments, lead = "", leadWidth = null, preferDetail = false) {
   if (!segments.length) return [];
 
   const items = toItems(segments);
@@ -2053,6 +2056,19 @@ function packSection(label, segments, lead = "", leadWidth = null) {
   const indent = cp(0x2800).repeat(indentWidth);
   const maxItemWidth = width - indentWidth; // widest an item can be on its own line
 
+  // One-line fast-path probes. `forms` already chosen (all-widest or all-narrowest); just measure.
+  const fitsOneLine = (forms) => {
+    const total = vlen(prefix) + forms.reduce((w, f) => w + vlen(f), 0) + (forms.length - 1) * SEP.length;
+    return total <= width ? prefix + forms.join(SEP) : null;
+  };
+  const wideLine = fitsOneLine(items.map((it) => it.alts[0]));
+  if (wideLine !== null) return [wideLine];
+  if (!preferDetail) {
+    const narrowLine = fitsOneLine(items.map((it) => it.alts[it.alts.length - 1]));
+    if (narrowLine !== null) return [narrowLine];
+  }
+
+  // Greedy per-item: walk left-to-right, widest → narrowest on current row → wrap with widest.
   const rows = [];
   let cur = prefix;
   let curLen = vlen(prefix);
@@ -2066,7 +2082,6 @@ function packSection(label, segments, lead = "", leadWidth = null) {
     const narrowLen = vlen(narrow);
     const sepLen = placed > 0 ? SEP.length : 0;
 
-    // Try widest, then narrowest, on the current row.
     if (curLen + sepLen + wideLen <= width) {
       cur += (placed > 0 ? SEP : "") + wide;
       curLen += sepLen + wideLen;
@@ -2116,7 +2131,7 @@ const sections = [
   packSection("turn", turnSegs),
   packSection("activity", activitySegs),
   packSection("repo", locSegs),
-  packSection("config", configSegs),
+  packSection("config", configSegs, "", null, true), // preferDetail: keep (m/u/p/l/x) breakdowns attached to wrapped items instead of collapsing to bare counts
   packSection("exts.", componentSegs),
   packSection("host", hostSegs),
   // "Info." row LAST — nearest the prompt. Leads with the CWD (always-present location anchor — the
