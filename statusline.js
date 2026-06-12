@@ -1912,8 +1912,8 @@ if (counts) {
     if (breakdown && total(c) > 0) {
       const tail = ` ${DIM}(${SCOPES.map((k) => (caps.includes(k) ? c[k] || 0 : "-")).join("/")})${RESET}`;
       // Two alts (widest-first), so packSection DROPS the (m/u/p/l/x) scope breakdown to reclaim
-      // width before it has to ellipsis-truncate the row — every item's count stays visible; only
-      // the per-scope detail goes, and only on rows that would otherwise overflow.
+      // width before it has to wrap the row — every item's count stays visible; only the per-scope
+      // detail goes, and only on rows that would otherwise overflow.
       return { alts: [base + tail, base] };
     }
     return base; // plain item (no breakdown): a single form, nothing to drop
@@ -2024,16 +2024,20 @@ const toItems = (segments) =>
 const SECTION_WIDTH = 8;
 const SEP = " | ";
 
-// `lead` is rendered once after the label (e.g. the gauge glyph on the Limits row). `leadWidth` is
-// accepted for call-site compatibility but no longer used (it used to indent continuation lines,
-// which no longer exist — see below).
+// `lead` is rendered once after the label (e.g. the clock on the limits row). `leadWidth` is its
+// TRUE rendered cell-width (icons here don't always match vlen's guess), used so continuation
+// lines indent PAST it and wrapped items align text-under-text, not under the lead's icon.
 //
-// FIXED-HEIGHT, NO-WRAP: each non-empty section is emitted as EXACTLY ONE line, ellipsis-truncated
-// if it overflows — never spilling onto continuation lines. This keeps the dashboard's TOTAL line
-// count independent of terminal width: a resize can no longer add or remove rows, so Claude Code's
-// "clear N lines then repaint" always matches the real height and old frames stop stacking when you
-// resize the window. (Trade-off: on a narrow pane the tail of a row is truncated, not wrapped.)
-function packSection(label, segments, lead = "", leadWidth = null) {
+// DETAIL-PREFERRED LAYOUT: lay out each item's WIDEST form (bars + scope-breakdown parens) and
+// wrap as needed. If the widest layout fits in ≤`detailRows`, keep it. Otherwise drop everything to
+// its NARROWEST alt (no bars, no breakdown parens) to reclaim space, then re-wrap.
+// `detailRows` default is 1 — for gauge rows (Model/Limits/Usage) one row of compact forms reads
+// better than two rows with bars. The Config row passes 2 so its scope-breakdown parens get a
+// second indented line at typical widths instead of being dropped to bare counts.
+// (NOTE: between fc7cbba and the 2026-06-12 revert, packSection was fixed-height / truncate-only to
+// dodge a Claude Code resize-stacking under-clear; that bug was fixed upstream in CC v2.1.170, so
+// wrapping is back. Multi-row sections still trigger the under-clear on PRE-2.1.170 CC versions.)
+function packSection(label, segments, lead = "", leadWidth = null, detailRows = 1) {
   if (!segments.length) return [];
 
   const items = toItems(segments);
@@ -2041,22 +2045,51 @@ function packSection(label, segments, lead = "", leadWidth = null) {
   const labelCap = label.charAt(0).toUpperCase() + label.slice(1);
   const prefixPlain = labelCap.padEnd(SECTION_WIDTH);
   const prefix = `${BOLD}${ITALIC}${SOFT}${prefixPlain}${RESET} ${lead}`;
+  // U+2800 (Braille blank) renders blank but is NOT whitespace, so Claude Code's per-line
+  // leading-whitespace strip leaves it intact — keeps wrapped rows aligned under the content.
+  const indentWidth = SECTION_WIDTH + 1 + (leadWidth ?? vlen(lead));
+  const indent = cp(0x2800).repeat(indentWidth);
+  const maxItemWidth = width - indentWidth; // widest an item can be on its own line
 
-  // Bars are a single-line luxury: use each item's WIDEST (with-bar) form only if the whole section
-  // fits on one line; otherwise drop to its narrowest (no-bar) form to buy space before truncating.
-  // Plain single-alt items are identical either way.
-  const fullForms = items.map((it) => it.alts[0]);
-  const oneRow = vlen(prefix) + fullForms.reduce((w, f) => w + vlen(f), 0) + (items.length - 1) * SEP.length;
-  const forms = oneRow <= width ? fullForms : items.map((it) => it.alts[it.alts.length - 1]);
+  // Lay forms out into wrapped rows. Returns the full row strings (with trailing " |" continuation
+  // markers); the caller uses .length as the row count to decide which form-set to commit to.
+  const layout = (forms) => {
+    const rows = [];
+    let cur = prefix;
+    let curLen = vlen(prefix);
+    let placed = 0;
+    for (let i = 0; i < items.length; i++) {
+      let form = forms[i];
+      // Only plain single-alt items may be ellipsis-truncated; gauges keep their narrowest form.
+      if (items[i].alts.length === 1 && vlen(form) > maxItemWidth) form = truncateVisible(form, maxItemWidth);
+      const formLen = vlen(form);
+      if (placed > 0 && curLen + SEP.length + formLen > width) {
+        // Out of room: keep a trailing " |" on the finished line as a continuation marker (dropping
+        // it silently reads as confusing), then start an aligned continuation line.
+        const marker = curLen + 2 <= width ? ` ${SOFT}|${RESET}` : "";
+        rows.push(cur + marker);
+        cur = indent + form;
+        curLen = indentWidth + formLen;
+      } else {
+        cur += (placed > 0 ? SEP : "") + form;
+        curLen += (placed > 0 ? SEP.length : 0) + formLen;
+      }
+      placed++;
+    }
+    rows.push(cur);
+    return rows;
+  };
 
-  // One line. Truncate (ANSI-balanced) to width only if it still overflows after dropping bars.
-  const line = prefix + forms.join(SEP);
-  return [vlen(line) > width ? truncateVisible(line, width) : line];
+  // Try widest first; if it fits in ≤detailRows rows, keep the detail. Otherwise drop to narrowest.
+  const wide = layout(items.map((it) => it.alts[0]));
+  if (wide.length <= detailRows) return wide;
+  return layout(items.map((it) => it.alts[it.alts.length - 1]));
 }
 
-// One ENTRY PER SECTION (each packSection emits exactly 0 or 1 line — fixed-height, no wrap). Built
-// as a slot list so the row budget is the SECTION COUNT, a constant, rather than "however many
-// sections happen to be non-empty this render".
+// One ENTRY PER SECTION; each packSection emits 0, 1, or (when the row is too wide even after
+// dropping bars + scope-breakdown parens) multiple wrapped lines. Built as a slot list so the row
+// budget is the SECTION COUNT, a constant for the empty-slot floor (see HEIGHT below) — even
+// though wrapping can push the actual height above it.
 const sections = [
   // Label ≠ var name for a few (renamed for clearer categories): session→Model, rate→Usage,
   // work→Repo. Vars kept to limit churn.
@@ -2066,7 +2099,7 @@ const sections = [
   packSection("turn", turnSegs),
   packSection("activity", activitySegs),
   packSection("repo", locSegs),
-  packSection("config", configSegs),
+  packSection("config", configSegs, "", null, 2), // 2-row detail budget: keep scope-breakdown parens visible on a 2nd indented line at typical widths
   packSection("exts.", componentSegs),
   packSection("host", hostSegs),
   // "Info." row LAST — nearest the prompt. Leads with the CWD (always-present location anchor — the
@@ -2075,15 +2108,14 @@ const sections = [
   packSection("info.", stateSegs),
 ];
 
-// CONSTANT HEIGHT — the load-bearing invariant. The dashboard ALWAYS emits the same number of lines,
-// independent of BOTH width (each section is one no-wrap line, fixed earlier) AND content (missing
-// sections are backfilled here). Claude Code reserves vertical space by the line count of the PREVIOUS
-// render, then clears that many and repaints; if our count DROPS between renders the old frame's extra
-// rows aren't cleared and STACK. The worst offender is /clear — it wipes the Turn + Activity rows at
-// once (e.g. 10 lines → 8) → CC under-clears → 2 ghost rows pile up on every /clear. Pinning the count
-// to the section total (one slot per section, empty slots padded) means /clear, cd-out-of-a-repo, a
-// todo finishing, a gauge appearing, etc. can no longer change the height — so nothing can stack.
-// (This completes the width-stability fix in fc7cbba; together they make height invariant to both axes.)
+// MINIMUM HEIGHT — pad empty section slots up to the section count so the dashboard never SHRINKS
+// between renders. CC reserves vertical space by the previous render's line count then clears that
+// many and repaints; if our count DROPS between renders the old frame's extra rows aren't cleared
+// and STACK. The worst offender is /clear — it wipes Turn + Activity at once (e.g. 10 lines → 8) →
+// CC under-clears → 2 ghost rows pile up on every /clear. Backfilling missing sections pins the
+// floor at HEIGHT so content-driven shrinkage can't trigger that. (Width-driven shrinkage CAN still
+// happen now that packSection may wrap — that was fixed in fc7cbba, reverted because the underlying
+// CC under-clear was fixed upstream in CC v2.1.170 and wrapping reads better on older versions.)
 const blank = cp(0x2800); // U+2800: non-whitespace, so CC's trailing-blank-row strip preserves it
 const contentRows = sections.flat().filter(Boolean); // the non-empty section lines, in order
 const HEIGHT = sections.length; // one row-slot per section — the fixed line budget
