@@ -142,19 +142,22 @@ function makeBar(pct, width = 10, colorCode = "") {
   return `${TRACK}${colorCode}${bar}${RESET}`;
 }
 
+// Timestamps arrive as ISO strings, epoch seconds, or epoch ms — normalize to epoch ms (NaN if unparseable).
+function toEpochMs(ts) {
+  if (ts === null || ts === undefined || ts === "") return NaN;
+  const s = String(ts).trim();
+  if (/^\d+(\.\d+)?$/.test(s)) {
+    const n = Number(s);
+    return n > 1e12 ? n : n * 1000;
+  }
+  return new Date(ts).getTime();
+}
+
 function formatResetTime(ts, fmt = "HH:mm") {
   if (ts === null || ts === undefined || ts === "") return "";
 
   try {
-    let d;
-    const s = String(ts).trim();
-    if (/^\d+(\.\d+)?$/.test(s)) {
-      const n = Number(s);
-      d = new Date(n > 1e12 ? n : n * 1000);
-    } else {
-      d = new Date(ts);
-    }
-
+    const d = new Date(toEpochMs(ts));
     if (Number.isNaN(d.getTime())) return "";
 
     const pad = (n) => String(n).padStart(2, "0");
@@ -1392,17 +1395,28 @@ function osBadge() {
   return { icon: gLinux, color: c256(208), label };
 }
 
-function rlBlock(node, label, fmt) {
+function rlBlock(node, label, fmt, windowMs) {
   const pct = node?.used_percentage ?? node?.utilization;
   if (pct === null || pct === undefined || pct === "") return null;
   const p = Math.round(Number(pct));
   if (!Number.isFinite(p)) return null;
 
   const rt = formatResetTime(node.resets_at ?? node.reset_at, fmt);
+  // Signed pace balance vs the even-consumption budget line ((elapsed/window)·100, window start =
+  // resets_at − window length): + = quota in hand (green), − = burning ahead of it (yellow).
+  // Suppressed inside the first 3% of the window, where the average is all noise.
+  let pace = "";
+  const resetMs = toEpochMs(node.resets_at ?? node.reset_at);
+  const elapsed = Number.isFinite(resetMs) && windowMs ? Date.now() - (resetMs - windowMs) : NaN;
+  const expected = elapsed > 0 ? Math.min(100, (elapsed / windowMs) * 100) : NaN;
+  if (expected >= 3) {
+    const bal = Math.round(expected - p);
+    pace = ` ${bal > 2 ? GREEN : bal < -2 ? YELLOW : SOFT}${bal >= 0 ? "+" : ""}${bal}%${RESET}`;
+  }
   // full = with bar; compact = no bar (packer falls back to this when the bar won't fit,
   // so a gauge degrades gracefully instead of getting truncated with an ellipsis).
-  const full = `${SOFT}${label}${RESET} ${makeBar(p, 10, usageColor(p))} ${usageColor(p)}${p}%${RESET}${rt ? ` ${SOFT}${rt}${RESET}` : ""}`;
-  const compact = `${SOFT}${label}${RESET} ${usageColor(p)}${p}%${RESET}${rt ? ` ${SOFT}(${rt})${RESET}` : ""}`;
+  const full = `${SOFT}${label}${RESET} ${makeBar(p, 10, usageColor(p))} ${usageColor(p)}${p}%${RESET}${rt ? ` ${SOFT}${rt}${RESET}` : ""}${pace}`;
+  const compact = `${SOFT}${label}${RESET} ${usageColor(p)}${p}%${RESET}${rt ? ` ${SOFT}(${rt})${RESET}` : ""}${pace}`;
   return [p, full, compact];
 }
 
@@ -1491,6 +1505,22 @@ async function fetchSonnetUsage(ttlMs = SONNET_TTL_MS) {
 // Must run before the stdin read; the detached child has no stdin.
 if (process.env.CLAUDE_STATUSLINE_USAGE_REFRESH === "1") {
   await fetchSonnetUsage();
+  // Piggyback a temp sweep on this out-of-band run (never costs the render path anything):
+  // sl-acc-* accumulators are one file PER SESSION and would pile up forever — TEMP isn't
+  // auto-cleaned on Windows. >7 days since last write = dead session (live ones rewrite every
+  // few renders). Stale sl-cache-* entries are caches; worst case is one recompute.
+  try {
+    const fs = require("node:fs");
+    const tmp = (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/");
+    const cutoff = Date.now() - 7 * 24 * 3600e3;
+    for (const name of fs.readdirSync(tmp)) {
+      if (!/^sl-(acc|cache)-.*\.json$/.test(name)) continue;
+      const path = tmp + "/" + name;
+      try {
+        if (fs.statSync(path).mtimeMs < cutoff) fs.unlinkSync(path);
+      } catch {}
+    }
+  } catch {}
   process.exit(0);
 }
 
@@ -1540,8 +1570,8 @@ const currentDir = data.cwd || data.workspace?.current_dir || data.worktree?.ori
 
 // rate_limits stdin only exposes five_hour + seven_day (seven_day already covers all models,
 // incl. Sonnet). The Sonnet-specific weekly is API-only (oauth/usage) — not worth a token+fetch.
-const rl5 = rlBlock(data.rate_limits?.five_hour, "5h", "auto"); // day abbrev only if it rolls to next day
-const rl7 = rlBlock(data.rate_limits?.seven_day, "7d", "ddd HH:mm");
+const rl5 = rlBlock(data.rate_limits?.five_hour, "5h", "auto", 5 * 3600e3); // day abbrev only if it rolls to next day
+const rl7 = rlBlock(data.rate_limits?.seven_day, "7d", "ddd HH:mm", 7 * 24 * 3600e3);
 // Sonnet weekly is API-only — only bother for Pro/Max sessions (rate_limits present in stdin).
 // Serve cached Sonnet usage INSTANTLY; refresh out-of-band when stale (never await the network here).
 let sonnetUsage = null;
@@ -1550,7 +1580,7 @@ if (data.rate_limits) {
   sonnetUsage = cached.data;
   if (!cached.fresh) spawnUsageRefresh();
 }
-const rl7s = rlBlock(sonnetUsage, "7dS", "ddd HH:mm");
+const rl7s = rlBlock(sonnetUsage, "7dS", "ddd HH:mm", 7 * 24 * 3600e3);
 const rlBlocks = [rl5, rl7, rl7s].filter(Boolean);
 
 let gitStr = "no branch";
