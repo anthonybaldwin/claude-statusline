@@ -8,7 +8,7 @@
 > - Or set env `DISABLE_AUTOUPDATER` and **downgrade** to **`2.1.162`** (`claude install 2.1.162`) — the last good version (`2.1.163`+ are affected).
 > - Or **live with it** and hit **`CTRL+L`** to repaint when it gets messy — note it only clears momentarily, then re-accrues.
 >
-> Pinning at `2.1.162` or stable (`2.1.153`) as of this writing means no Fable.
+> Pinning to stable (`2.1.153` as of this commit) or `2.1.162` means **no Fable 5**. :(
 
 # claude-statusline
 
@@ -31,6 +31,8 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   200k long-context pricing line on an extended-context (>200k) model.
 - **Limits** — the `5h` and `7d` rate-limit windows with usage bars, percentages, and reset
   times; plus the Sonnet weekly window (fetched from the OAuth usage API, cached with a TTL).
+  Each gauge carries a signed pace balance vs the even-consumption budget line for its window:
+  `+N%` = quota in hand (green), `-N%` = burning ahead of pace (yellow).
 - **Usage** — total session cost, `$/h` burn rate, throughput (tok/s), API time, and wall-clock.
 - **Turn** — the last call's token makeup: input / output / cache-write / cache-read.
 - **Activity** — active slash command, todo progress, last tool call, sub-agents (each running
@@ -55,8 +57,12 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
 ## Requirements
 
 - [**Bun**](https://bun.sh) — the script runs under `bun` (uses `Bun.stdin` / `Bun.main`).
-- A [**Nerd Font**](https://www.nerdfonts.com/) in your terminal — all icons are Nerd Font
-  glyphs. Without one, icons render as tofu boxes (the text still works).
+- A [**Nerd Font**](https://www.nerdfonts.com/) installed — all icons are Nerd Font glyphs.
+  It doesn't have to be your primary terminal font: some terminals fall back to installed fonts
+  automatically (e.g. Ghostty on macOS), while others need it listed as an explicit fallback —
+  in Windows Terminal, set the font face to e.g. `MonoLisa, SymbolsNerdFont`. Patching your
+  existing font with the Nerd Fonts patcher is also an option. Without a Nerd Font anywhere in
+  the chain, icons render as tofu boxes (the text still works).
 - A terminal with **truecolor (24-bit)** support for the smoothest effort-level gradients
   (256-color still looks fine).
 
