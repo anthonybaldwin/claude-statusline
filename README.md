@@ -4,10 +4,11 @@
 > If the statusline and other UI duplicate or stack on screen, or your terminal cursor is often positioned incorrectly, this is a regression in recent Claude Code builds — not the plugin. Multi-line statuslines and wide terminals are common triggers. Tracking (at least): anthropics/claude-code#66013 and anthropics/claude-code#65989.
 >
 > **Options:**
-> - **Downgrade** to **`2.1.162`** (`claude install 2.1.162`) — the last good version (`2.1.163`+ are affected).
+> - Set `autoUpdatesChannel` to `stable` in settings.json
+> - Or set env `DISABLE_AUTOUPDATER` and **downgrade** to **`2.1.162`** (`claude install 2.1.162`) — the last good version (`2.1.163`+ are affected).
 > - Or **live with it** and hit **`CTRL+L`** to repaint when it gets messy — note it only clears momentarily, then re-accrues.
 >
-> Pinning at `2.1.162` means no Fable.
+> Pinning at `2.1.162` or stable (`2.1.153`) as of this writing means no Fable.
 
 # claude-statusline
 
