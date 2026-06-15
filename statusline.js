@@ -1456,6 +1456,9 @@ function spawnUsageRefresh() {
       env: { ...process.env, CLAUDE_STATUSLINE_USAGE_REFRESH: "1" },
       detached: true,
       stdio: "ignore",
+      // Windows: detached children get a fresh console that flashes visibly; hide it. The
+      // child (and the curl it may spawn) inherit this hidden console — no terminal flash.
+      windowsHide: true,
     }).unref();
   } catch {}
 }
@@ -1487,7 +1490,12 @@ async function fetchSonnetUsage(ttlMs = SONNET_TTL_MS) {
   if (!usage) {
     // Node/Bun TLS fingerprint sometimes draws a 403 from this endpoint; curl works.
     try {
-      const r = spawnSync("curl", ["-s", "--max-time", "2", url, "-H", `Authorization: Bearer ${token}`, "-H", "anthropic-beta: oauth-2025-04-20", "-H", "Accept: application/json"], { encoding: "utf8" });
+      // Token via curl's stdin config (-K -), not a -H arg, so it stays out of the process command line.
+      const r = spawnSync(
+        "curl",
+        ["-s", "--max-time", "2", url, "-H", "anthropic-beta: oauth-2025-04-20", "-H", "Accept: application/json", "-K", "-"],
+        { encoding: "utf8", windowsHide: true, input: `header = "Authorization: Bearer ${token}"\n` },
+      );
       if (!r.error && r.status === 0 && r.stdout) usage = JSON.parse(r.stdout);
     } catch {}
   }

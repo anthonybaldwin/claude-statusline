@@ -95,3 +95,6 @@ window. Kept to a few chars on purpose — the user wants it terse; don't expand
 - Commit when a change is done and verified; **do not push without being asked.**
 - Test renders share the real `$TEMP/sl-*.json` caches — clean up anything you seed with fake
   data.
+- **Subprocess hygiene:** pass secrets (the OAuth token) to `curl` via its stdin config
+  (`-K -`), never a `-H`/CLI arg — args are visible in process listings. Add `windowsHide: true`
+  to every `spawn`/`spawnSync` so console/detached children don't flash a terminal on Windows.
