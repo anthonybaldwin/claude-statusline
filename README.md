@@ -8,7 +8,7 @@
 > - Or set env `DISABLE_AUTOUPDATER` and **downgrade** to **`2.1.162`** (`claude install 2.1.162`) — the last good version (`2.1.163`+ are affected).
 > - Or **live with it** and hit **`CTRL+L`** to repaint when it gets messy — note it only clears momentarily, then re-accrues.
 >
-> Pinning to stable (`2.1.153` as of this commit) or `2.1.162` means **no Fable 5**. :(
+> If you want to use Fable once/if it's back, you'll need to undo any version pins you may have made above.
 
 # claude-statusline
 
