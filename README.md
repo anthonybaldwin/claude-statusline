@@ -1,7 +1,7 @@
 > [!IMPORTANT]
 > **Known issue: statusline/UI clobbering & input cursor jumping**
 >
-> If the status line and other UI duplicate or stack on screen, or your terminal cursor is often positioned incorrectly, this is a regression in recent Claude Code builds — not the status line addition — though it may be more common when using. Tracking (at least): anthropics/claude-code#66013 and anthropics/claude-code#65989.
+> If the status line and other UI duplicate or stack on screen, or your terminal cursor is often positioned incorrectly, this is a regression in recent Claude Code builds — not the status line addition. Tracking (at least): anthropics/claude-code#66013 and anthropics/claude-code#65989.
 >
 > **Options:**
 > - Set `autoUpdatesChannel` to `stable` in settings.json
