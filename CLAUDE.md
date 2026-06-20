@@ -85,8 +85,9 @@ terminal, not just the aesthetics.
 
 Each Limits gauge appends a signed pace balance vs the even-consumption budget line
 (`(elapsed/window)·100`, window start = `resets_at` − window length): `+N%` = quota in hand
-(green), `-N%` = burning ahead (yellow), SOFT within ±2%, suppressed in the first 3% of a
-window. Kept to a few chars on purpose — the user wants it terse; don't expand it into words
+(green), `-N%` = burning ahead (yellow), SOFT within ±2%, shown as soon as any time has elapsed
+in the window (suppressed only for a degenerate just-reset window — matches usage-buttons'
+PaceMetric). Kept to a few chars on purpose — the user wants it terse; don't expand it into words
 ("reserve"/"over pace") or give it a dedicated row.
 
 ## Workflow notes

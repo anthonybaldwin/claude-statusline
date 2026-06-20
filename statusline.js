@@ -1404,12 +1404,13 @@ function rlBlock(node, label, fmt, windowMs) {
   const rt = formatResetTime(node.resets_at ?? node.reset_at, fmt);
   // Signed pace balance vs the even-consumption budget line ((elapsed/window)·100, window start =
   // resets_at − window length): + = quota in hand (green), − = burning ahead of it (yellow).
-  // Suppressed inside the first 3% of the window, where the average is all noise.
+  // Shown as soon as any time has elapsed in the window (matches usage-buttons' PaceMetric, which
+  // only skips a degenerate just-reset window); suppressed only when expected is NaN/non-positive.
   let pace = "";
   const resetMs = toEpochMs(node.resets_at ?? node.reset_at);
   const elapsed = Number.isFinite(resetMs) && windowMs ? Date.now() - (resetMs - windowMs) : NaN;
   const expected = elapsed > 0 ? Math.min(100, (elapsed / windowMs) * 100) : NaN;
-  if (expected >= 3) {
+  if (expected > 0) {
     const bal = Math.round(expected - p);
     pace = ` ${bal > 2 ? GREEN : bal < -2 ? YELLOW : SOFT}${bal >= 0 ? "+" : ""}${bal}%${RESET}`;
   }
