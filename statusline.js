@@ -10,7 +10,7 @@ import {
   readSync,
   statSync,
 } from "node:fs";
-import { basename as pathBasename, join, relative } from "node:path";
+import { basename as pathBasename, dirname, join, relative } from "node:path";
 import { homedir, release, hostname, userInfo } from "node:os";
 
 const esc = "\x1b";
@@ -852,17 +852,40 @@ function cachedByMtime(key, sigPaths, extraSig, compute) {
   return val;
 }
 
-// Auto-memory dir for a project: ~/.claude/projects/<slug>/memory, slug = the LAUNCH dir with
-// every non-alphanumeric char mapped to "-" (CC's project-dir encoding, e.g.
-// "C:\Users\a\repo" → "C--Users-a-repo"). Memory is keyed by where the session LAUNCHED
-// (workspace.project_dir), not the repo root.
-function memoryDir(launchDir) {
-  if (!launchDir) return null;
-  return join(HOME, ".claude", "projects", String(launchDir).replace(/[^a-zA-Z0-9]/g, "-"), "memory");
+// CC's project-dir path encoding (every non-alphanumeric char → "-", e.g. "C:\Users\a\repo" →
+// "C--Users-a-repo") applied to a dir → its ~/.claude/projects/<slug>/memory path.
+function memorySlugDir(dir) {
+  return join(HOME, ".claude", "projects", String(dir).replace(/[^a-zA-Z0-9]/g, "-"), "memory");
+}
+
+// Auto-memory dir resolution (docs: memory#auto-memory; research from PR #1). Off (null) when
+// CLAUDE_CODE_DISABLE_AUTO_MEMORY=1 or autoMemoryEnabled:false in any settings scope (highest
+// precedence wins). Location: an autoMemoryDirectory override (any scope, ~/ expanded, holds the
+// memory files directly) else CC's per-project ~/.claude/projects/<slug>/memory. That project dir
+// ALSO holds this session's transcript, so transcript_path is the authoritative anchor — CC's own
+// encoding, no slug guessing. Fallback slugs: the MAIN repo root (a linked worktree keys memory by
+// the main root while its transcript is keyed by cwd), then the launch dir. First dir that exists
+// wins; none existing → null (no memory yet).
+function memoryDir(transcriptPath, mainRoot, launchDir, scopeSettings) {
+  if (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY === "1") return null;
+  const pick = (key) => {
+    for (const s of scopeSettings) if (s && s[key] !== undefined) return s[key]; // first defined wins (precedence)
+    return undefined;
+  };
+  if (pick("autoMemoryEnabled") === false) return null;
+  const dirs = [];
+  const override = pick("autoMemoryDirectory");
+  if (typeof override === "string" && override)
+    dirs.push(override.startsWith("~/") ? join(HOME, override.slice(2)) : override);
+  if (transcriptPath) dirs.push(join(dirname(transcriptPath), "memory")); // sibling of this session's transcript
+  if (mainRoot) dirs.push(memorySlugDir(mainRoot)); // worktree → main-root keyed memory
+  if (launchDir) dirs.push(memorySlugDir(launchDir));
+  for (const d of dirs) if (existsSync(d)) return d;
+  return null;
 }
 
 // Each entry is a per-scope {m,u,p,l} breakdown (see the scope helpers above for what each means).
-function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir) {
+function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir, transcriptPath) {
   if (!projectDir) return null;
   const managed = detectManaged();
   // PROJECT/LOCAL scope reads from `projDir` (the project root). If that root IS the user's home
@@ -936,8 +959,16 @@ function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir) {
   // also declares counts once, at user scope). In practice the plugin-declared set is empty.
   const userChans = userChannelNames();
   const xChannels = [...(plug.channelNames || [])].filter((n) => !userChans.has(n)).length;
-  // Auto-memory count: individual memory .md files; MEMORY.md is the index, not a memory.
-  const memDir = memoryDir(launchDir);
+  // Auto-memory count: individual memory .md files; MEMORY.md is the index, not a memory. The
+  // enable/location settings follow the settings precedence chain (managed > local > project >
+  // user); project & local settings only take effect once the workspace is trusted — same gate as
+  // every other project/local read here.
+  const memDir = memoryDir(transcriptPath, mainRoot, launchDir, [
+    managed?.settings, // m (highest precedence)
+    trusted && projDir ? readJson(join(projDir, ".claude", "settings.local.json")) : null, // l
+    trusted && projDir ? readJson(join(projDir, ".claude", "settings.json")) : null, // p
+    readJson(join(HOME, ".claude", "settings.json")), // u (lowest)
+  ]);
   const memoryCount = memDir
     ? Math.max(0, countFiles(memDir, /\.md$/i) - (fileExists(join(memDir, "MEMORY.md")) ? 1 : 0))
     : 0;
@@ -2073,7 +2104,13 @@ const counts = displayRoot
         join(HOME, ".claude", "channels"), // user-installed message channels (Exts. row)
         join(HOME, ".claude", "workflows"), // user workflows
         join(HOME, ".claude", "routines"), // user routines
-        memoryDir(launchDir) || "", // auto-memory dir — mtime bumps as memories are written mid-session
+        // Auto-memory candidate dirs — mtime bumps as memories are written mid-session. The
+        // transcript-sibling dir is the authoritative location; the slug dirs are the fallbacks.
+        // (Settings-override resolution lives in configCounts; the settings files are already
+        // in this signature list.)
+        data.transcript_path ? join(dirname(data.transcript_path), "memory") : "",
+        mainRoot ? memorySlugDir(mainRoot) : "",
+        launchDir ? memorySlugDir(launchDir) : "",
         join(HOME, ".claude", "CLAUDE.md"), // user-scope memory (doc)
         join(managedDir(), "managed-settings.json"), // enterprise/managed scope (hooks, claudeMd)
         join(managedDir(), "managed-mcp.json"), // enterprise/managed MCP
@@ -2081,8 +2118,10 @@ const counts = displayRoot
         join(HOME, ".claude", "plugins", "installed_plugins.json"), // plugin-provided component counts
         join(HOME, ".claude", "plugins", "plugin-catalog-cache.json"), // marketplace-inline components (LSP etc.)
       ],
-      addedDirCount,
-      () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot, launchDir)
+      // extraSig: added-dir count + the auto-memory kill switch — the env var isn't a watchable
+      // file, so it must join the signature or a toggle would keep serving the cached counts.
+      addedDirCount + "|" + (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY || ""),
+      () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot, launchDir, data.transcript_path)
     )
   : null;
 // config gets its OWN row (own section). Numeric counts (no ✓/✗). Repo-relative docs
