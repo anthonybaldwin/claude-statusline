@@ -1,20 +1,15 @@
-> [!IMPORTANT]
-> **Known issue: statusline/UI clobbering & input cursor jumping**
->
-> If the status line and other UI duplicate or stack on screen, or your terminal cursor is often positioned incorrectly, this is a regression in recent Claude Code builds — not the status line addition. Tracking (at least): anthropics/claude-code#66013 and anthropics/claude-code#65989.
->
-> **Options:**
-> - Set `autoUpdatesChannel` to `stable` in settings.json
-> - Or set env `DISABLE_AUTOUPDATER` and **downgrade** to **`2.1.162`** (`claude install 2.1.162`) — the last good version (`2.1.163`+ are affected).
-> - Or **live with it** and hit **`CTRL+L`** to repaint when it gets messy — note it only clears momentarily, then re-accrues.
->
-> If you want to use Fable once/if it's back, you'll need to undo any version pins you may have made above.
+> [!NOTE]
+> **Resolved: statusline/UI clobbering & input cursor jumping** — Claude Code builds `2.1.163`–`2.1.169`
+> had a repaint regression that made the status line and other UI duplicate or stack on screen
+> (anthropics/claude-code#66013, anthropics/claude-code#65989). It was fixed upstream in **`2.1.170`**;
+> current builds render cleanly. If you pinned or downgraded while it was live (`autoUpdatesChannel`,
+> `DISABLE_AUTOUPDATER`, `claude install 2.1.162`), undo those pins.
 
 # claude-statusline
 
 A cross-platform [Claude Code](https://claude.com/claude-code) [status line](https://code.claude.com/docs/en/statusline) — context, cost,
 rate-limit windows, git, and full config-scope breakdowns — rendered as an opinionated, multi-row
-dashboard with Nerd Font glyphs. One zero-dependency [Bun](https://bun.sh) script.
+dashboard with Nerd Font glyphs. Zero-dependency [Bun](https://bun.sh) scripts, no build step.
 
 It reads the JSON Claude Code feeds to a status-line command on stdin (model, context window,
 cost, rate limits, cwd, git/PR, vim mode, …), enriches it with cheap local reads (git, config
@@ -51,7 +46,7 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   agents, commands, skills (incl. output-styles), workflows, routines, rules, MCP servers,
   claude.ai connectors, claude-in-chrome, hooks, plugins, themes (plugin or your own
   `~/.claude/themes/`), and session-added dirs.
-- **Components** — plugin-*exclusive* component types, each shown with its count (`0` included, the
+- **Exts.** — plugin-*exclusive* component types, each shown with its count (`0` included, the
   same as Config): LSP servers, background monitors, `bin/` executables, and message channels.
   Counts include components declared inline in a plugin's **marketplace entry**, not just in the
   plugin's own files (which is how the official LSP plugins ship them).

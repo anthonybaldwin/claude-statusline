@@ -93,7 +93,7 @@ const gCfgHooks = cp(0xf06e2); // nf-md-hook
 const gCfgPlugins = cp(0xf1288); // nf-md-toy_brick (LEGO)
 const gCfgConn = cp(0xf015f); // nf-md-cloud — claude.ai connectors
 const gCfgDirs = cp(0xf0257); // nf-md-folder_plus
-// Components-row icons (plugin-exclusive component types) — all Material Design.
+// Exts.-row icons (plugin-exclusive component types) — all Material Design.
 const gCfgLsp = cp(0xf0761); // nf-md-code_braces — LSP / language servers
 const gCfgMonitor = cp(0xf0437); // nf-md-radar — background monitors
 const gCfgTheme = cp(0xf03d8); // nf-md-palette — color themes (artist's palette)
@@ -693,7 +693,7 @@ function pluginComponentCounts(projectDir, trusted, disabled, needsAuth) {
     for (const s of Object.keys(servers))
       if (!disabled.has(`plugin:${base}:${s}`) && !needsAuth.has(`plugin:${base}:${s}`)) out.mcps++;
 
-    // --- Plugin-exclusive component types (the "Components" row). All x-scope only. ---
+    // --- Plugin-exclusive component types (the "Exts." row). All x-scope only. ---
     // LSP: `.lsp.json` is a TOP-LEVEL lang→config map (NOT wrapped in `lspServers` like a project
     // file); inline form uses eff.lspServers as an object. Count distinct language keys.
     const lspFile = readJson(join(root, ".lsp.json"));
@@ -958,7 +958,7 @@ function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir) {
     plugins: pluginsBreakdown(projDir, trusted, managed),
     connectors: connectorsBreakdown(),
     dirs: { l: Array.isArray(addedDirs) ? addedDirs.length : 0 }, // session-added dirs (local-ish)
-    // Plugin-bundled component types → the "Components" row. x-only except themes (also in
+    // Plugin-bundled component types → the "Exts." row. x-only except themes (also in
     // ~/.claude/themes/) and channels (also in ~/.claude/channels/) — both carry a u/x breakdown.
     lsp: { x: plug.lsp },
     monitors: { x: plug.monitors },
@@ -2069,7 +2069,7 @@ const counts = displayRoot
         join(HOME, ".claude", "skills"),
         join(HOME, ".claude", "rules"),
         join(HOME, ".claude", "output-styles"),
-        join(HOME, ".claude", "themes"), // user color themes (Components row)
+        join(HOME, ".claude", "themes"), // user color themes (Config row — themes have a user scope, unlike Exts. items)
         join(HOME, ".claude", "channels"), // user-installed message channels (Exts. row)
         join(HOME, ".claude", "workflows"), // user workflows
         join(HOME, ".claude", "routines"), // user routines
@@ -2148,7 +2148,7 @@ if (counts) {
   configSegs.push(`${c256(75)}${gCfgChrome}${RESET} ${counts.chrome ? gOk : gNo}`);
   show(gCfgHooks, counts.hooks, { color: c256(220), breakdown: true, caps: "muplx" }); // gold
   show(gCfgPlugins, counts.plugins, { color: BRICK, breakdown: true, caps: "mupl" }); // LEGO red
-  // Themes belong with the multi-scope Config items, not the plugin-only Components row: a theme can
+  // Themes belong with the multi-scope Config items, not the plugin-only Exts. row: a theme can
   // come from a plugin (x) OR your own ~/.claude/themes/ (u), so it carries a u/x breakdown.
   show(gCfgTheme, counts.themes, { color: c256(213), breakdown: true, caps: "ux" }); // orchid
   show(gCfgDirs, counts.dirs, { color: c256(250) }); // silver — session-added dirs
