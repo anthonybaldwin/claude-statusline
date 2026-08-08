@@ -256,14 +256,33 @@ function readTail(filePath, maxBytes) {
 }
 
 function git(dir, args) {
-  const r = spawnSync("git", ["-C", dir, "--no-optional-locks", ...args], { encoding: "utf8" });
+  const r = spawnSync("git", ["-C", dir, "--no-optional-locks", ...args], { encoding: "utf8", windowsHide: true });
   if (r.error || r.status !== 0) return null;
   return r.stdout;
 }
 
-function gitStatus(dir) {
-  const out = git(dir, ["status", "--porcelain=v2", "--branch"]);
-  if (out === null) return null;
+// Async twin of git() — resolves to stdout on success, null on any failure. The render fires its
+// git subprocesses CONCURRENTLY through this (a Windows process spawn is ~30-50ms; the old
+// back-to-back spawnSync chain made git the single largest slice of every render).
+function gitAsync(dir, args) {
+  return new Promise((resolve) => {
+    try {
+      const child = spawn("git", ["-C", dir, "--no-optional-locks", ...args], {
+        stdio: ["ignore", "pipe", "ignore"],
+        windowsHide: true,
+      });
+      let out = "";
+      child.stdout.on("data", (d) => (out += d));
+      child.on("error", () => resolve(null));
+      child.on("close", (code) => resolve(code === 0 ? out : null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function parseGitStatus(out) {
+  if (out === null || out === undefined) return null;
 
   let branch = "";
   let oid = "";
@@ -299,12 +318,13 @@ function gitStatus(dir) {
   return { branch, ahead, behind, staged, modified, untracked, conflicts };
 }
 
-function latestTagStatus(dir) {
-  const tag = git(dir, ["describe", "--tags", "--abbrev=0", "--match", "v*", "HEAD"])?.trim();
-  if (!tag) return null;
-
-  const count = Number(git(dir, ["rev-list", "--count", `${tag}..HEAD`])?.trim()) || 0;
-  return { tag, count };
+// One long-form `git describe` replaces the old describe + rev-list pair (2 subprocesses → 1):
+// `--long` always emits "<tag>-<count>-g<sha>", even sitting exactly on the tag. Tag names may
+// themselves contain dashes (v1.2-rc1), so anchor the split on the trailing "-<N>-g<hex>".
+function parseTagStatus(out) {
+  const m = String(out || "").trim().match(/^(.+)-(\d+)-g[0-9a-f]+$/);
+  if (!m) return null;
+  return { tag: m[1], count: Number(m[2]) || 0 };
 }
 
 function basename(p) {
@@ -1421,8 +1441,10 @@ function rlBlock(node, label, fmt, windowMs) {
   return [p, full, compact];
 }
 
-// Sonnet weekly limit lives only behind the OAuth usage API (not in stdin). Read the OAuth
-// token and fetch it, but cache the result with a TTL so we hit the API at most once per window.
+// Per-model weekly limits + usage-credit spend live only behind the OAuth usage API (not in
+// stdin — verified against the v2.1.226 payload builder: rate_limits carries ONLY five_hour +
+// seven_day). Read the OAuth token and fetch it, but cache the result with a TTL so we hit the
+// API at most once per window.
 function readOauthToken() {
   try {
     if (process.platform === "darwin") {
@@ -1437,14 +1459,17 @@ function readOauthToken() {
   }
 }
 
-const SONNET_TTL_MS = 5 * 60 * 1000;
-const sonnetCacheFile = () => (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/") + "/sl-usage.json";
+const USAGE_TTL_MS = 5 * 60 * 1000;
+const usageCacheFile = () => (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/") + "/sl-usage.json";
 
-// Synchronous, network-free read of the cached Sonnet usage — used by the render path so it never
-// blocks. `fresh` = within the TTL (no refresh needed).
-function readSonnetCache() {
-  const prev = readJson(sonnetCacheFile());
-  const fresh = !!(prev && typeof prev.ts === "number" && Date.now() - prev.ts < SONNET_TTL_MS);
+// Synchronous, network-free read of the cached usage-API response — used by the render path so it
+// never blocks. `fresh` = within the TTL (no refresh needed). The cache holds the FULL response
+// object now (it used to hold just `seven_day_sonnet`, which the API retired to a permanent null
+// in favor of the `limits` array — that's what silently killed the old 7dS gauge). A stale
+// old-shape `data` simply lacks `limits`/`spend`, so it renders nothing until the first refresh.
+function readUsageCache() {
+  const prev = readJson(usageCacheFile());
+  const fresh = !!(prev && typeof prev.ts === "number" && Date.now() - prev.ts < USAGE_TTL_MS);
   return { data: prev?.data ?? null, fresh };
 }
 
@@ -1464,8 +1489,8 @@ function spawnUsageRefresh() {
   } catch {}
 }
 
-async function fetchSonnetUsage(ttlMs = SONNET_TTL_MS) {
-  const cacheFile = sonnetCacheFile();
+async function fetchUsage(ttlMs = USAGE_TTL_MS) {
+  const cacheFile = usageCacheFile();
   const prev = readJson(cacheFile);
   if (prev && typeof prev.ts === "number" && Date.now() - prev.ts < ttlMs) return prev.data ?? null; // fresh
 
@@ -1480,10 +1505,13 @@ async function fetchSonnetUsage(ttlMs = SONNET_TTL_MS) {
     "User-Agent": "claude-statusline/1.0",
   };
 
+  // Timeouts are GENEROUS (8s): this only ever runs in the detached refresh child, never on the
+  // render path — and the endpoint routinely takes ~2s to answer, so the old 2s cutoffs lost the
+  // race and left the cache permanently null.
   let usage = null;
   try {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
+    const timer = setTimeout(() => controller.abort(), 8000);
     const res = await fetch(url, { headers, signal: controller.signal });
     clearTimeout(timer);
     if (res.ok) usage = await res.json();
@@ -1494,26 +1522,28 @@ async function fetchSonnetUsage(ttlMs = SONNET_TTL_MS) {
       // Token via curl's stdin config (-K -), not a -H arg, so it stays out of the process command line.
       const r = spawnSync(
         "curl",
-        ["-s", "--max-time", "2", url, "-H", "anthropic-beta: oauth-2025-04-20", "-H", "Accept: application/json", "-K", "-"],
+        ["-s", "--max-time", "8", url, "-H", "anthropic-beta: oauth-2025-04-20", "-H", "Accept: application/json", "-K", "-"],
         { encoding: "utf8", windowsHide: true, input: `header = "Authorization: Bearer ${token}"\n` },
       );
       if (!r.error && r.status === 0 && r.stdout) usage = JSON.parse(r.stdout);
     } catch {}
   }
 
-  const sonnet = usage && typeof usage === "object" ? usage.seven_day_sonnet ?? null : prev?.data ?? null;
+  // Store the WHOLE response — the render picks out `limits` (scoped weekly gauges) and `spend`
+  // (usage credits). Extracting single fields here is what rotted last time the API reshaped.
+  const val = usage && typeof usage === "object" ? usage : prev?.data ?? null;
   // Always bump the timestamp (even on failure) so we don't re-hit the API before the TTL.
   try {
-    require("node:fs").writeFileSync(cacheFile, JSON.stringify({ ts: Date.now(), data: sonnet }));
+    require("node:fs").writeFileSync(cacheFile, JSON.stringify({ ts: Date.now(), data: val }));
   } catch {}
-  return sonnet;
+  return val;
 }
 
 // Detached usage-refresh fast path (see spawnUsageRefresh): a backgrounded copy lands here, updates
-// the Sonnet usage cache, and exits WITHOUT rendering — so the foreground never blocks on the network.
+// the usage-API cache, and exits WITHOUT rendering — so the foreground never blocks on the network.
 // Must run before the stdin read; the detached child has no stdin.
 if (process.env.CLAUDE_STATUSLINE_USAGE_REFRESH === "1") {
-  await fetchSonnetUsage();
+  await fetchUsage();
   // Piggyback a temp sweep on this out-of-band run (never costs the render path anything):
   // sl-acc-* accumulators are one file PER SESSION and would pile up forever — TEMP isn't
   // auto-cleaned on Windows. >7 days since last write = dead session (live ones rewrite every
@@ -1542,6 +1572,20 @@ try {
 } catch {
   process.exit(0);
 }
+
+// Launch ALL git subprocesses up front and CONCURRENTLY (gitAsync), before the sync transcript/
+// settings file work — their ~30-50ms-per-process Windows spawn cost then overlaps both each other
+// and the CPU-bound parsing below, instead of serializing after it (was the biggest render slice).
+// Outside a repo all three fail fast in parallel; results are awaited down at the Repo-row build.
+const currentDir = data.cwd || data.workspace?.current_dir || data.worktree?.original_cwd;
+const gitJobs =
+  currentDir && existsSync(currentDir)
+    ? Promise.all([
+        gitAsync(currentDir, ["status", "--porcelain=v2", "--branch"]),
+        gitAsync(currentDir, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]),
+        gitAsync(currentDir, ["describe", "--tags", "--long", "--match", "v*", "HEAD"]),
+      ])
+    : null;
 
 const settings = readJson(join(HOME, ".claude", "settings.json")) || {};
 const transcript = parseTranscript(data.transcript_path);
@@ -1575,44 +1619,86 @@ const elapsedMs = typeof data.cost?.total_duration_ms === "number" && data.cost.
     : 0;
 const elapsedMinutes = elapsedMs / 60000;
 
-const currentDir = data.cwd || data.workspace?.current_dir || data.worktree?.original_cwd;
-
-// rate_limits stdin only exposes five_hour + seven_day (seven_day already covers all models,
-// incl. Sonnet). The Sonnet-specific weekly is API-only (oauth/usage) — not worth a token+fetch.
+// rate_limits stdin only exposes five_hour + seven_day (verified in the v2.1.226 payload builder;
+// seven_day covers all models). Per-model scoped weeklies + usage credits are API-only (below).
 const rl5 = rlBlock(data.rate_limits?.five_hour, "5h", "auto", 5 * 3600e3); // day abbrev only if it rolls to next day
 const rl7 = rlBlock(data.rate_limits?.seven_day, "7d", "ddd HH:mm", 7 * 24 * 3600e3);
-// Sonnet weekly is API-only — only bother for Pro/Max sessions (rate_limits present in stdin).
-// Serve cached Sonnet usage INSTANTLY; refresh out-of-band when stale (never await the network here).
-let sonnetUsage = null;
+// The extra gauges are API-only — only bother for Pro/Max sessions (rate_limits present in stdin).
+// Serve the cached response INSTANTLY; refresh out-of-band when stale (never await the network here).
+let usageData = null;
 if (data.rate_limits) {
-  const cached = readSonnetCache();
-  sonnetUsage = cached.data;
+  const cached = readUsageCache();
+  usageData = cached.data;
   if (!cached.fresh) spawnUsageRefresh();
 }
-const rl7s = rlBlock(sonnetUsage, "7dS", "ddd HH:mm", 7 * 24 * 3600e3);
-const rlBlocks = [rl5, rl7, rl7s].filter(Boolean);
+// MODEL-SCOPED weekly gauges from the API's `limits` array (its modern shape — the old per-model
+// `seven_day_<model>` buckets are retired to permanent nulls). Each `weekly_scoped` entry is a
+// per-model cap normalized to its OWN 0-100% (e.g. Fable's cap is ~50% of the all-model weekly,
+// but reads as a full 0-100 gauge here — so 7dF 15% means 15% of the FABLE allowance, not of 7d).
+// `session`/`weekly_all` kinds duplicate stdin's 5h/7d, so only scoped entries are added. Labeled
+// "7d" + first letter of the scope's model ("Fable" → 7dF), echoing the old 7dS convention.
+const scopedBlocks = [];
+for (const lim of Array.isArray(usageData?.limits) ? usageData.limits : []) {
+  if (lim?.kind !== "weekly_scoped") continue;
+  const name = String(lim.scope?.model?.display_name || lim.scope?.surface || "").trim();
+  const block = rlBlock(
+    { used_percentage: lim.percent, resets_at: lim.resets_at },
+    `7d${(name.charAt(0) || "?").toUpperCase()}`,
+    "ddd HH:mm",
+    7 * 24 * 3600e3,
+  );
+  if (block) scopedBlocks.push(block);
+}
+if (!scopedBlocks.length) {
+  // Legacy-shape fallback (pre-`limits` API): per-model weekly buckets as top-level objects.
+  for (const [key, label] of [["seven_day_sonnet", "7dS"], ["seven_day_opus", "7dO"]]) {
+    const block = rlBlock(usageData?.[key], label, "ddd HH:mm", 7 * 24 * 3600e3);
+    if (block) scopedBlocks.push(block);
+  }
+}
+// USAGE CREDITS (pay-per-use overage once a plan limit is hit) from the API `spend` block —
+// amounts in minor currency units (amount_minor 5000 + exponent 2 = $50.00). Only shown once
+// credits are enabled AND something has actually been spent this month: a standing $0 gauge is
+// noise on this deliberately terse row, but the moment credits kick in it appears — which is
+// exactly the event worth surfacing. No pace suffix (monthly spend has no even-burn budget line).
+let crBlock = null;
+{
+  const sp = usageData?.spend;
+  const minor = (m) => (Number(m?.amount_minor) || 0) / 10 ** (Number.isFinite(Number(m?.exponent)) ? Number(m.exponent) : 2);
+  if (sp?.enabled && Number(sp.used?.amount_minor) > 0) {
+    const used = minor(sp.used);
+    const limit = minor(sp.limit);
+    const p = Math.round(Number(sp.percent) || (limit > 0 ? (used / limit) * 100 : 0));
+    const money = `${VAL}${formatCost(used)}${RESET}${limit > 0 ? `${SOFT}/$${Math.round(limit)}${RESET}` : ""}`;
+    const full = `${SOFT}Cr${RESET} ${makeBar(p, 10, usageColor(p))} ${usageColor(p)}${p}%${RESET} ${money}`;
+    const compact = `${SOFT}Cr${RESET} ${usageColor(p)}${p}%${RESET} ${money}`;
+    crBlock = [p, full, compact];
+  }
+}
+const rlBlocks = [rl5, rl7, ...scopedBlocks, crBlock].filter(Boolean);
 
 let gitStr = "no branch";
 let repoRoot = currentDir; // working-tree root (the worktree's OWN dir when in a linked worktree)
 let mainRoot = null; // MAIN repo root (parent of the shared git common dir) — drives the FOLDER name
 let inRepo = false;
 let tagInfo = null;
-if (currentDir && existsSync(currentDir)) {
-  const st = gitStatus(currentDir);
+// Collect the concurrent git jobs launched up top (status / rev-parse / describe --long).
+const [stOut, rpOut, descOut] = gitJobs ? await gitJobs : [null, null, null];
+{
+  const st = parseGitStatus(stOut);
   if (st) {
     inRepo = true;
     // One rev-parse, two outputs: line 1 = working-tree root (--show-toplevel); line 2 = the COMMON
     // git dir (--git-common-dir), shared by every worktree. The common dir's PARENT is the main repo
     // root — so a linked worktree shows its PARENT repo (e.g. "topside-events") as the folder instead
     // of echoing the worktree's own name (which the worktree segment already shows).
-    const rp = git(currentDir, ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]);
     let common = null;
-    if (rp) {
-      const lines = rp.split("\n").map((s) => s.trim()).filter(Boolean);
+    if (rpOut) {
+      const lines = rpOut.split("\n").map((s) => s.trim()).filter(Boolean);
       if (lines[0]) repoRoot = lines[0];
       common = lines[1] || null;
     } else {
-      const top = git(currentDir, ["rev-parse", "--show-toplevel"]); // fallback for git < 2.31
+      const top = git(currentDir, ["rev-parse", "--show-toplevel"]); // fallback for git < 2.31 (--path-format unsupported)
       if (top && top.trim()) repoRoot = top.trim();
     }
     const stripped = common ? common.replace(/[\\/]\.git[\\/]*$/i, "") : ""; // drop trailing /.git
@@ -1626,7 +1712,7 @@ if (currentDir && existsSync(currentDir)) {
     if (st.untracked > 0) gitStr += ` ${BBLUE}?${st.untracked}${RESET}`;
     if (st.conflicts > 0) gitStr += ` ${RED}!${st.conflicts}${RESET}`;
 
-    tagInfo = latestTagStatus(currentDir);
+    tagInfo = parseTagStatus(descOut);
   }
 }
 

@@ -30,9 +30,12 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   that warns early (yellow ≥50%, red ≥80%) plus a red `200K+` marker once you cross the fixed
   200k long-context pricing line on an extended-context (>200k) model.
 - **Limits** — the `5h` and `7d` rate-limit windows with usage bars, percentages, and reset
-  times; plus the Sonnet weekly window (fetched from the OAuth usage API, cached with a TTL).
-  Each gauge carries a signed pace balance vs the even-consumption budget line for its window:
-  `+N%` = quota in hand (green), `-N%` = burning ahead of pace (yellow).
+  times; plus any model-scoped weekly caps from the OAuth usage API's `limits` array (cached
+  with a TTL) — e.g. `7dF` for the Fable weekly allowance, which the API normalizes to its own
+  0–100% scale. Each windowed gauge carries a signed pace balance vs the even-consumption budget
+  line: `+N%` = quota in hand (green), `-N%` = burning ahead of pace (yellow). A `Cr` gauge
+  (monthly usage-credit spend, `$used/$limit`) appears only once credits actually start being
+  consumed.
 - **Usage** — total session cost, `$/h` burn rate, throughput (tok/s), API time, and wall-clock.
 - **Turn** — the last call's token makeup: input / output / cache-write / cache-read.
 - **Activity** — active slash command, todo progress, last tool call, sub-agents (each running
