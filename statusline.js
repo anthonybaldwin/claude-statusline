@@ -100,6 +100,14 @@ const gCfgTheme = cp(0xf03d8); // nf-md-palette — color themes (artist's palet
 const gCfgBin = cp(0xf0614); // nf-md-application — bin/ executables on PATH
 const gCfgChannel = cp(0xf028c); // nf-md-forum — message channels (telegram/slack-style injection)
 const gCfgChrome = cp(0xf268); // nf-fa-chrome — claude-in-chrome (FA exception in this MD row; if it renders blank use nf-md-google_chrome 0xf02af)
+const gCfgWorkflows = cp(0xf04aa); // nf-md-sitemap — saved orchestration workflows (.claude/workflows)
+const gCfgRoutines = cp(0xf00f0); // nf-md-calendar_clock — scheduled routines (.claude/routines)
+const gCfgMemory = cp(0xf09d1); // nf-md-brain — auto-memory files for this project (~/.claude/projects/<slug>/memory)
+// Origin-remote host badges (Repo row) — Material Design; codepoints verified against glyphnames.json.
+const gGithub = cp(0xf02a4); // nf-md-github
+const gGitlab = cp(0xf0ba0); // nf-md-gitlab
+const gBitbucket = cp(0xf00a8); // nf-md-bitbucket
+const gRepoHost = cp(0xf0ccf); // nf-md-source_repository — any other origin host
 const gOk = cp(0x2714) + cp(0xfe0e); // ✔︎ heavy check + U+FE0E text-presentation selector (forces glyph, never emoji)
 const gNo = cp(0x2718) + cp(0xfe0e); // ✘︎ heavy ballot X + text-presentation selector
 const FULL = "█";
@@ -655,7 +663,7 @@ function marketplaceEntry(key, cache) {
 // a plugin enabled from two marketplaces counts once). This is the "plugin" (x) scope — the lowest-
 // precedence source for agents/commands/skills/hooks/MCP (docs: plugins-reference component dirs).
 function pluginComponentCounts(projectDir, trusted, disabled, needsAuth) {
-  const out = { agents: 0, commands: 0, skills: 0, hooks: 0, mcps: 0, lsp: 0, monitors: 0, themes: 0, bin: 0, channels: 0 };
+  const out = { agents: 0, commands: 0, skills: 0, hooks: 0, mcps: 0, workflows: 0, lsp: 0, monitors: 0, themes: 0, bin: 0, channels: 0 };
   const installed = readJson(join(HOME, ".claude", "plugins", "installed_plugins.json"));
   const seen = new Set();
   const channelNames = new Set(); // plugin-DECLARED channel names (de-duped across plugins)
@@ -707,6 +715,9 @@ function pluginComponentCounts(projectDir, trusted, disabled, needsAuth) {
     if (Array.isArray(themeInline)) out.themes += themeInline.length;
     else if (typeof themeInline !== "string") out.themes += countFiles(join(root, "themes"), /\.json$/i);
 
+    // Workflows: "workflows" is in CC's plugin component-type list alongside agents/commands/etc.
+    // — count the plugin's workflows/ entries (scripts, so no .md filter).
+    out.workflows += countFiles(join(root, "workflows"));
     // bin/: executables added to PATH (count all entries).
     out.bin += countFiles(join(root, "bin"));
     // channels[]: a plugin MAY declare message channels inline (string name, or {name|id}). In
@@ -841,8 +852,17 @@ function cachedByMtime(key, sigPaths, extraSig, compute) {
   return val;
 }
 
+// Auto-memory dir for a project: ~/.claude/projects/<slug>/memory, slug = the LAUNCH dir with
+// every non-alphanumeric char mapped to "-" (CC's project-dir encoding, e.g.
+// "C:\Users\a\repo" → "C--Users-a-repo"). Memory is keyed by where the session LAUNCHED
+// (workspace.project_dir), not the repo root.
+function memoryDir(launchDir) {
+  if (!launchDir) return null;
+  return join(HOME, ".claude", "projects", String(launchDir).replace(/[^a-zA-Z0-9]/g, "-"), "memory");
+}
+
 // Each entry is a per-scope {m,u,p,l} breakdown (see the scope helpers above for what each means).
-function configCounts(projectDir, addedDirs, currentDir, mainRoot) {
+function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir) {
   if (!projectDir) return null;
   const managed = detectManaged();
   // PROJECT/LOCAL scope reads from `projDir` (the project root). If that root IS the user's home
@@ -888,10 +908,18 @@ function configCounts(projectDir, addedDirs, currentDir, mainRoot) {
   const agents = withX(dirBreakdown(projDir, "agents", { recursive: true }), plug.agents); // recursive
   const commands = withX(dirBreakdown(projDir, "commands", { pattern: /\.md$/ }), plug.commands);
   const skills = skillsBreakdown(projDir, plug.skills); // skills + output-styles, deduped by name
+  // Workflows (saved orchestration scripts) + routines (scheduled agents): both are dirs CC
+  // discovers at user AND project scope (verified in the v2.1.226 binary's .claude subdir list —
+  // `.claude/workflows` / `.claude/routines` are resolved per-project alongside agents/commands).
+  // Workflow scripts aren't .md, so count all entries. Workflows also exist as a plugin component
+  // type (x); routines don't.
+  const workflows = withX(dirBreakdown(projDir, "workflows", {}), plug.workflows);
+  const routines = dirBreakdown(projDir, "routines", {});
   if (!trusted) {
     hooks.p = hooks.l = 0; // hooks: project + local blocked
     mcps.p = mcps.l = 0; // MCP: project + local blocked
     agents.p = commands.p = skills.p = 0; // project agents/commands/skills not discovered (no local form)
+    workflows.p = routines.p = 0; // executable project config — blocked untrusted, like the above
     // plugin (x) counts already exclude project/local-enabled plugins via plug (trust-aware);
     // the plugins-widget p/l are gated inside pluginsBreakdown(projDir, trusted) below.
   }
@@ -908,14 +936,22 @@ function configCounts(projectDir, addedDirs, currentDir, mainRoot) {
   // also declares counts once, at user scope). In practice the plugin-declared set is empty.
   const userChans = userChannelNames();
   const xChannels = [...(plug.channelNames || [])].filter((n) => !userChans.has(n)).length;
+  // Auto-memory count: individual memory .md files; MEMORY.md is the index, not a memory.
+  const memDir = memoryDir(launchDir);
+  const memoryCount = memDir
+    ? Math.max(0, countFiles(memDir, /\.md$/i) - (fileExists(join(memDir, "MEMORY.md")) ? 1 : 0))
+    : 0;
   return {
     managed, // {dir, settings, mcpServers, claudeMd} — source objects the m-scope counts read from
     chrome: chromeEnabled, // claude-in-chrome enabled (extension installed + toggle on + onboarded)
     trusted, // false → executable project/local scopes zeroed (untrusted workspace)
     claude: claudeMd(), // CONTENT — loads untrusted, not gated
+    memory: { u: memoryCount }, // auto-memory — per-project, user-level storage; flat count
     agents,
     commands,
     skills,
+    workflows,
+    routines,
     rules: dirBreakdown(projDir, "rules", { recursive: true }), // CONTENT — loads untrusted, not gated
     mcps,
     hooks,
@@ -1594,7 +1630,7 @@ const acc = accumulateStats(data.transcript_path, data.session_id);
 const modelId = data.model?.id || "";
 const model = data.model?.display_name || "Unknown Model";
 const effort = data.effort?.level || settings.effortLevel || defaultEffort(modelId, model);
-const fastMode = settings.fastMode === true;
+const fastMode = (data.fast_mode ?? settings.fastMode) === true; // stdin is live session truth; settings is the pre-2.1.x fallback
 
 const usage = data.context_window?.current_usage;
 const contextSize = Number(data.context_window?.context_window_size) || 200000;
@@ -1863,8 +1899,20 @@ if (data.vim?.mode) {
 if (data.agent?.name) {
   stateSegs.push(`${SILVER}${gUser}${RESET} ${VAL}${data.agent.name}${RESET}`);
 }
-// session id (first UUID segment) — for `claude --resume`; lives on the Info. row now.
-if (sid) stateSegs.push(`${SILVER}${gKey}${RESET} ${VAL}${sid.split("-")[0]}${RESET}`);
+// remote — present when the session is attached to a remote/cloud workspace. In the v2.1.226
+// payload builder (`...du()!==null&&{remote:{session_id:...}}`) but NOT yet in the docs schema,
+// so gate defensively on a non-empty id. Cloud glyph reused from the connectors widget.
+if (data.remote?.session_id) stateSegs.push(`${c256(117)}${gCfgConn}${RESET} ${VAL}remote${RESET}`);
+// Session identity — the custom/AI-generated session title (stdin session_name, added ~2.1.x;
+// transcript customTitle as the fallback for older CC) is the human-facing value, with the
+// `claude --resume`-able id (first UUID segment) demoted to DIM parens. No name → the id stays
+// the primary value as before. Default display names ("my-app-3f") never populate session_name.
+const sessionName = truncate(data.session_name || transcript?.sessionName || "", 32);
+if (sessionName) {
+  stateSegs.push(`${SILVER}${gKey}${RESET} ${VAL}${sessionName}${RESET}${sid ? ` ${DIM}(${sid.split("-")[0]})${RESET}` : ""}`);
+} else if (sid) {
+  stateSegs.push(`${SILVER}${gKey}${RESET} ${VAL}${sid.split("-")[0]}${RESET}`);
+}
 
 // Peak hours disabled — Anthropic no longer distinguishes peak/off-peak for rate limits
 // (https://aitoolsrecap.com/Blog/anthropic-claude-code-rate-limits-doubled-opus-api-2026).
@@ -1941,6 +1989,24 @@ const locSegs = [];
 if (inRepo) {
   // Headline project name is the folder basename (stable, matches your mental model).
   locSegs.push(`${BBLUE}${gTree}${RESET} ${VAL}${dirName}${RESET}`);
+  // Remote identity from workspace.repo ({host, owner, name} parsed from the origin remote —
+  // absent outside a repo or with no origin). Host-branded badge + owner; owner/name only when
+  // the remote repo name DIFFERS from the folder headline (fork/rename) — when they match, the
+  // name is already the headline and repeating it is noise.
+  const repoId = data.workspace?.repo;
+  if (repoId?.owner) {
+    const host = String(repoId.host || "").toLowerCase();
+    const [hostIcon, hostColor] = host.includes("github")
+      ? [gGithub, SILVER]
+      : host.includes("gitlab")
+        ? [gGitlab, ORANGE]
+        : host.includes("bitbucket")
+          ? [gBitbucket, BBLUE]
+          : [gRepoHost, SOFT];
+    const sameName = String(repoId.name || "").toLowerCase() === String(dirName).toLowerCase();
+    const id = sameName ? `${VAL}${repoId.owner}${RESET}` : `${VAL}${repoId.owner}${SOFT}/${RESET}${VAL}${repoId.name}${RESET}`;
+    locSegs.push(`${hostColor}${hostIcon}${RESET} ${id}`);
+  }
   if (worktree) locSegs.push(`${MAGENTA}${gTree}${RESET} ${VAL}${worktree}${RESET}`);
   locSegs.push(`${CYAN}${gBranch}${RESET} ${gitStr}`);
   // PR — the current branch's OPEN pull request, straight from Claude Code's native `pr` payload
@@ -1973,6 +2039,7 @@ if (inRepo) {
 }
 
 const addedDirCount = Array.isArray(data.workspace?.added_dirs) ? data.workspace.added_dirs.length : 0;
+const launchDir = data.workspace?.project_dir || currentDir; // keys the auto-memory slug
 const counts = displayRoot
   ? cachedByMtime(
       "cfg-" + hashPath(displayRoot),
@@ -1985,6 +2052,8 @@ const counts = displayRoot
         join(displayRoot, ".claude", "skills"),
         join(displayRoot, ".claude", "rules"),
         join(displayRoot, ".claude", "output-styles"),
+        join(displayRoot, ".claude", "workflows"), // project workflows (saved orchestration scripts)
+        join(displayRoot, ".claude", "routines"), // project routines (scheduled agents)
         join(displayRoot, ".mcp.json"), // project (shared) MCP servers
         join(displayRoot, "CLAUDE.md"),
         join(displayRoot, "AGENTS.md"),
@@ -2002,6 +2071,9 @@ const counts = displayRoot
         join(HOME, ".claude", "output-styles"),
         join(HOME, ".claude", "themes"), // user color themes (Components row)
         join(HOME, ".claude", "channels"), // user-installed message channels (Exts. row)
+        join(HOME, ".claude", "workflows"), // user workflows
+        join(HOME, ".claude", "routines"), // user routines
+        memoryDir(launchDir) || "", // auto-memory dir — mtime bumps as memories are written mid-session
         join(HOME, ".claude", "CLAUDE.md"), // user-scope memory (doc)
         join(managedDir(), "managed-settings.json"), // enterprise/managed scope (hooks, claudeMd)
         join(managedDir(), "managed-mcp.json"), // enterprise/managed MCP
@@ -2010,7 +2082,7 @@ const counts = displayRoot
         join(HOME, ".claude", "plugins", "plugin-catalog-cache.json"), // marketplace-inline components (LSP etc.)
       ],
       addedDirCount,
-      () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot)
+      () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot, launchDir)
     )
   : null;
 // config gets its OWN row (own section). Numeric counts (no ✓/✗). Repo-relative docs
@@ -2051,12 +2123,20 @@ if (counts) {
   // breakdown showing where they live. caps "mupl" — managed/user/project/local; plugins don't
   // provide CLAUDE.md → "-".
   show(gCfgDoc, counts.claude, { color: c256(36), breakdown: true, caps: "mupl" }); // teal
+  // Auto-memory — persistent per-project memory files (~/.claude/projects/<slug>/memory, minus
+  // the MEMORY.md index). Sits by CLAUDE.md: both are content that loads into every session.
+  // Flat count — one storage location, no scope spread.
+  show(gCfgMemory, counts.memory, { color: c256(177) }); // lilac
   // Agents/Cmds/Skills: User + Project + Plugin (no local/managed form) → caps "upx".
   // (Skills also subsumes output-styles — styles are migrating to skills, deduped by name:
   //  https://support.claude.com/en/articles/10181068-styles-are-moving-to-skills)
   show(gCfgAgents, counts.agents, { color: c256(211), breakdown: true, caps: "upx" }); // pink
   show(gCfgCmds, counts.commands, { color: c256(32), breakdown: true, caps: "upx" }); // green
   show(gCfgSkills, counts.skills, { color: c256(141), breakdown: true, caps: "upx" }); // purple — incl. styles
+  // Workflows (saved orchestration scripts): User + Project + Plugin → caps "upx".
+  // Routines (scheduled agents): User + Project only → caps "up".
+  show(gCfgWorkflows, counts.workflows, { color: c256(78), breakdown: true, caps: "upx" }); // spring green
+  show(gCfgRoutines, counts.routines, { color: c256(173), breakdown: true, caps: "up" }); // terracotta
   // Rules: User + Project only (plugins don't provide these) → caps "up".
   show(gCfgRules, counts.rules, { color: c256(33), breakdown: true, caps: "up" }); // blue
   // MCP & Hooks support every scope (managed + user/project/local + plugin) → caps "muplx".

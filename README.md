@@ -41,12 +41,14 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
 - **Activity** — active slash command, todo progress, last tool call, sub-agents (each running
   agent with its own task count, plus a green ✔ tally of completed ones), and the session's edit
   volume (+added / −removed lines).
-- **Repo** — *(only inside a git repo)* project name, worktree, branch with ahead/behind and
-  staged/modified/untracked/conflict counts, the current branch's open PR (colored by review
-  state), and the latest `v*` tag with commits-since.
+- **Repo** — *(only inside a git repo)* project name, origin-remote identity (host-branded
+  GitHub/GitLab/Bitbucket badge + `owner`, or `owner/name` when the remote name differs from the
+  folder), worktree, branch with ahead/behind and staged/modified/untracked/conflict counts, the
+  current branch's open PR (colored by review state), and the latest `v*` tag with commits-since.
 - **Config** — what's actually loaded, each broken down by Claude Code's real config scopes
   **(managed / user / project / local / plugin)**, de-duped by precedence and gated on workspace
-  trust: CLAUDE.md memory, agents, commands, skills (incl. output-styles), rules, MCP servers,
+  trust: CLAUDE.md memory, auto-memory files (this project's `~/.claude/projects/<slug>/memory/`),
+  agents, commands, skills (incl. output-styles), workflows, routines, rules, MCP servers,
   claude.ai connectors, claude-in-chrome, hooks, plugins, themes (plugin or your own
   `~/.claude/themes/`), and session-added dirs.
 - **Components** — plugin-*exclusive* component types, each shown with its count (`0` included, the
@@ -55,7 +57,9 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   plugin's own files (which is how the official LSP plugins ship them).
 - **Host** — local clock, OS badge with real version, and `user@host`.
 - **Info.** — current directory (home-relativized, leaf preserved when long), vim mode,
-  output style, Claude Code version, agent name, and the session id (for `claude --resume`).
+  output style, Claude Code version, agent name, a `remote` cloud marker for remote-attached
+  sessions, and the session identity: its custom/AI-generated name when one exists, with the
+  id (for `claude --resume`) in dim parens.
 
 ## Requirements
 
@@ -118,8 +122,8 @@ everything it needs (settings, transcript, project config) from their normal loc
 `subagent-statusline.js` implements Claude Code's
 [`subagentStatusLine`](https://code.claude.com/docs/en/statusline#subagent-status-lines) setting —
 the per-subagent row in the agent panel below the prompt. It renders each row as
-`name · description · ● · NNk tok`, colored by status (running / completed / error) and clamped to
-the row width, matching the main dashboard. Wire it up alongside `statusLine`:
+`name · description · model effort · ● · NNk tok`, colored by status (running / completed / error)
+and clamped to the row width, matching the main dashboard. Wire it up alongside `statusLine`:
 
 ```json
 {

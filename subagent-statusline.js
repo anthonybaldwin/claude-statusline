@@ -134,7 +134,16 @@ function statusStyle(s) {
 // and let the description carry the row.
 const GENERIC_NAMES = new Set(["internal_agent", "local_agent", "agent"]);
 
-// Row body: [robot] name · dim description · [status glyph] · NNk tok — clamped to the row width.
+// Per-agent model + effort (each task carries `model`, `effort`, `contextWindowSize` since CC
+// ~2.1.2xx). Strip the "claude-" prefix so "claude-opus-5" reads "opus-5"; effort appended plain.
+// One dim string — metadata, not the row's signal.
+function modelEffort(task) {
+  const model = String(task.model || "").replace(/^claude-/, "").replace(/-\d{8}$/, ""); // drop date suffix ("haiku-4-5-20251001" → "haiku-4-5")
+  return [model, task.effort].filter(Boolean).join(" ");
+}
+
+// Row body: [robot] name · dim description · dim model+effort · [status glyph] · NNk tok — clamped
+// to the row width.
 function renderRow(task, cols) {
   const name = String(task.name || task.type || "agent");
   const st = statusStyle(normalizeStatus(task.status));
@@ -147,6 +156,8 @@ function renderRow(task, cols) {
     ? [`${CYAN}${gAgent}${RESET} ${BOLD}${name}${RESET}`]
     : [`${CYAN}${gAgent}${RESET} ${SOFT}${truncate(task.description, 56)}${RESET}`];
   if (showName && task.description) parts.push(`${SOFT}${truncate(task.description, 40)}${RESET}`);
+  const me = modelEffort(task);
+  if (me) parts.push(`${DIM}${me}${RESET}`);
   parts.push(`${st.color}${st.glyph}${RESET}`);
   const tok = Number(task.tokenCount) || 0;
   if (tok > 0) parts.push(`${SOFT}${formatTokens(tok)} tok${RESET}`);
