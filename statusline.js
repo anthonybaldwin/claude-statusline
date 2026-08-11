@@ -2434,12 +2434,15 @@ const sections = sectionSpecs.map(([label, segs, lead, leadWidth, preferDetail])
 //   already shown — so once a wrap grows the dashboard, later wrap-free renders keep the height
 //   instead of shrinking. The mark resets when COLUMNS/LINES change (a resize forces CC into a
 //   full repaint anyway).
-//   SHORT TERMINAL: CC renders the whole statusline only if it fits under its own chrome —
-//   otherwise it hard-trims our tail AND its own footer/mode line (observed v2.1.223). CC
-//   exports LINES (terminal rows, verified in the live env alongside COLUMNS), so we shrink
-//   FIRST: wrapped rows are squeezed out (cut with a trailing " …"), then whole sections drop in
-//   DROP_ORDER until the dashboard + CC's chrome fit. CHROME_RESERVE ≈ prompt box (3) + footer
-//   (1) + spinner/hint rows (~3) + slack; plus our own gap row, separately.
+//   SHORT TERMINAL: CC gives the statusline whatever remains AFTER the current turn's
+//   transcript tail + prompt box + its own footer — and when that's less than our height it
+//   hard-trims our tail AND the footer/mode line rather than scrolling (observed v2.1.223,
+//   102×26 split pane: a 13-line dashboard got ~9 rows, cut stayed until the turn content
+//   scrolled). The transcript share is unknowable per-render, so budget by proportion instead:
+//   the dashboard takes at most a THIRD of LINES (CC's terminal-height belief, exported
+//   alongside COLUMNS — trust it even when the real pane is bigger, because CC lays out and
+//   trims by its belief). Over budget: wrapped rows are squeezed out (cut with a trailing
+//   " …"), then whole sections drop in DROP_ORDER.
 //   RUNAWAY GROWTH on tall terminals: wraps are welcome when LINES has room (that's the whole
 //   point of a tall window — no "…" data loss), but bounded by WRAP_HEADROOM extra rows past the
 //   section count so a pathological wrap can't produce a 20-line dashboard.
@@ -2448,12 +2451,11 @@ const sections = sectionSpecs.map(([label, segs, lead, leadWidth, preferDetail])
 // ends with the essentials — Info/Limits/Model survive longest.
 const SQUEEZE_ORDER = ["config", "exts.", "activity", "turn", "usage", "limits", "model", "repo", "host", "info."];
 const DROP_ORDER = ["exts.", "config", "host", "activity", "turn", "repo", "usage", "info.", "limits", "model"];
-const CHROME_RESERVE = 8; // rows kept free below the dashboard for CC's own UI
 const WRAP_HEADROOM = 4; // max wrap rows past the section count, even on a very tall terminal
 const termRows = parseInt(process.env.LINES, 10) || 0; // 0 → unknown (piped tests) → treat as roomy
 const maxContent = Math.min(
   sectionSpecs.length + WRAP_HEADROOM,
-  termRows > 0 ? Math.max(1, termRows - CHROME_RESERVE - 1) : Infinity, // -1: our gap row
+  termRows > 0 ? Math.max(1, Math.floor(termRows / 3)) : Infinity, // ≤ a third of the terminal
 );
 {
   const specIdx = (label) => sectionSpecs.findIndex((s) => s[0] === label);

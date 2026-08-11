@@ -41,9 +41,10 @@ terminal, not just the aesthetics.
    the slot floor (empty sections backfill blank) AND a per-session high-water mark
    (`sl-hwm-*.json`, keyed to `COLUMNS×LINES`) that pads later renders up to the tallest height
    already shown; the mark resets on resize (which forces a full CC repaint anyway). Short
-   terminal: when statusline + CC chrome exceed the window, CC hard-trims our tail AND its own
-   footer (observed v2.1.223) — so we shrink first: CC exports `LINES`, and content clamps to
-   `LINES - CHROME_RESERVE - 1`; over budget, the squeeze loop re-packs the tallest section
+   terminal: CC gives the statusline what remains after the turn's transcript tail + prompt +
+   its own footer, and hard-trims our tail AND the footer when we exceed it (observed
+   v2.1.223) — the transcript share is unknowable, so content clamps to a THIRD of `LINES`
+   (CC's exported height belief); over budget, the squeeze loop re-packs the tallest section
    (ties by `SQUEEZE_ORDER`) one row shorter via `packSection`'s `maxRows` (cut with a trailing
    `…`), then whole sections vanish in `DROP_ORDER`. Tall terminal: wraps beyond the section
    count are allowed (no `…` data loss) up to `WRAP_HEADROOM` extra rows. **Adding a row =
