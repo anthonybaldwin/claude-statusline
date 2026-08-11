@@ -67,6 +67,7 @@ const gWin = cp(0xf05b3); // nf-md-microsoft_windows
 const gApple = cp(0xf0035); // nf-md-apple
 const gLinux = cp(0xf17c); // nf-fa-linux (Tux) — only ever renders on Linux, so the Win-font FA-tofu gotcha doesn't apply here
 const gPerson = cp(0xf0004); // nf-md-account (MD — the FA user glyph is tofu in the Windows font)
+const gFleet = cp(0xf037a); // nf-md-monitor_multiple — OTHER live Claude Code sessions on this machine
 const gVim = cp(0xe62b); // nf-dev-vim
 const gCommand = cp(0xf120); // nf-fa-terminal
 const gPeak = cp(0xf185); // nf-fa-sun_o
@@ -1906,6 +1907,32 @@ const hostSegs = [];
     const idStr = user && host ? `${VAL}${user}${DIM}@${VAL}${host}${RESET}` : `${VAL}${user || host}${RESET}`;
     hostSegs.push(`${c256(114)}${gPerson}${RESET} ${idStr}`);
   }
+
+  // Fleet — OTHER live Claude Code sessions on this machine; the same population behind the
+  // "← N agent" count in CC's own footer (which is other SESSIONS, not this session's subagents
+  // and not agent-definition files — those are the Activity robot and the Config robot). CC
+  // registers every running process in ~/.claude/sessions/<pid>.json (undocumented; observed in
+  // v2.1.223: {pid, sessionId, cwd, name, status, ...}). Registry files can outlive a crashed
+  // process, so an entry only counts after a signal-0 probe proves its pid is still alive.
+  // Excluded by sessionId (not pid) so a respawned-in-place session can't count itself. Hidden
+  // at 0 — an always-on "no other sessions" widget is noise.
+  {
+    const others = [];
+    let regFiles = [];
+    try { regFiles = readdirSync(join(HOME, ".claude", "sessions")); } catch {}
+    for (const f of regFiles) {
+      if (!f.endsWith(".json")) continue;
+      const s = readJson(join(HOME, ".claude", "sessions", f));
+      if (!s?.pid || !s.sessionId || s.sessionId === sid) continue;
+      try { process.kill(s.pid, 0); } catch { continue; } // stale registry file — process is gone
+      others.push(s.name || String(s.pid));
+    }
+    if (others.length > 0) {
+      const head = `${c256(110)}${gFleet}${RESET} ${VAL}${others.length}${RESET}`;
+      const list = others.slice(0, 2).join(", ") + (others.length > 2 ? ", …" : "");
+      hostSegs.push({ alts: [`${head} ${DIM}(${list})${RESET}`, head] });
+    }
+  }
 }
 const outputStyle = data.output_style?.name;
 if (outputStyle && outputStyle !== "default") {
@@ -2283,10 +2310,13 @@ const SEP = " | ";
 // `preferDetail` (default false) flips off the all-narrowest one-line pass. The Config row passes
 // true so its (m/u/p/l/x) breakdowns stay attached to items that wrap, instead of the whole row
 // collapsing to bare counts.
+// `maxRows` (default Infinity) caps how many lines the section may emit: when the greedy pass
+// would wrap past the budget it CUTS instead — the finished row ends in " …" and the remaining
+// items are dropped. Used by the total-height cap below (see HEIGHT), never passed directly.
 // (NOTE: between fc7cbba and the 2026-06-12 revert, packSection was fixed-height / truncate-only to
 // dodge a Claude Code resize-stacking under-clear; that bug was fixed upstream in CC v2.1.170, so
 // wrapping is back. Multi-row sections still trigger the under-clear on PRE-2.1.170 CC versions.)
-function packSection(label, segments, lead = "", leadWidth = null, preferDetail = false) {
+function packSection(label, segments, lead = "", leadWidth = null, preferDetail = false, maxRows = Infinity) {
   if (!segments.length) return [];
 
   const items = toItems(segments);
@@ -2333,6 +2363,12 @@ function packSection(label, segments, lead = "", leadWidth = null, preferDetail 
       cur += SEP + narrow;
       curLen += sepLen + narrowLen;
     } else {
+      // Row budget spent → CUT instead of wrapping: end the current row with an ellipsis (the
+      // " |" continuation marker would promise a next line that isn't coming) and drop the rest.
+      if (rows.length + 2 > maxRows) {
+        if (curLen + 2 <= width) cur += ` ${SOFT}…${RESET}`;
+        break;
+      }
       // Wrap. Place widest on the new row; only if widest itself overflows do we degrade — to
       // narrow if it fits, else truncate (single-alt items only).
       if (placed > 0) {
@@ -2363,35 +2399,63 @@ function packSection(label, segments, lead = "", leadWidth = null, preferDetail 
 }
 
 // One ENTRY PER SECTION; each packSection emits 0, 1, or (when the row is too wide even after
-// dropping bars + scope-breakdown parens) multiple wrapped lines. Built as a slot list so the row
-// budget is the SECTION COUNT, a constant for the empty-slot floor (see HEIGHT below) — even
-// though wrapping can push the actual height above it.
-const sections = [
+// dropping bars + scope-breakdown parens) multiple wrapped lines. Kept as [label, segs, ...args]
+// SPECS (not packed results) so the height cap below can RE-pack an over-budget section with a
+// tighter maxRows. The spec count is the fixed line budget (see HEIGHT below).
+const sectionSpecs = [
   // Label ≠ var name for a few (renamed for clearer categories): session→Model, rate→Usage,
   // work→Repo. Vars kept to limit churn.
-  packSection("model", sessionSegs),
-  packSection("limits", quotaSegs, limitLead, limitLeadW),
-  packSection("usage", rateSegs),
-  packSection("turn", turnSegs),
-  packSection("activity", activitySegs),
-  packSection("repo", locSegs),
-  packSection("config", configSegs, "", null, true), // preferDetail: keep (m/u/p/l/x) breakdowns attached to wrapped items instead of collapsing to bare counts
-  packSection("exts.", componentSegs),
-  packSection("host", hostSegs),
+  ["model", sessionSegs],
+  ["limits", quotaSegs, limitLead, limitLeadW],
+  ["usage", rateSegs],
+  ["turn", turnSegs],
+  ["activity", activitySegs],
+  ["repo", locSegs],
+  ["config", configSegs, "", null, true], // preferDetail: keep (m/u/p/l/x) breakdowns attached to wrapped items instead of collapsing to bare counts
+  ["exts.", componentSegs],
+  ["host", hostSegs],
   // "Info." row LAST — nearest the prompt. Leads with the CWD (always-present location anchor — the
   // Repo row above is repo-only now), then vim mode (where CC's native "-- INSERT --" used to sit),
   // output-style, version, agent name, and session id.
-  packSection("info.", stateSegs),
+  ["info.", stateSegs],
 ];
+const sections = sectionSpecs.map(([label, segs, lead, leadWidth, preferDetail]) =>
+  packSection(label, segs, lead ?? "", leadWidth ?? null, preferDetail ?? false),
+);
 
-// MINIMUM HEIGHT — pad empty section slots up to the section count so the dashboard never SHRINKS
-// between renders. CC reserves vertical space by the previous render's line count then clears that
-// many and repaints; if our count DROPS between renders the old frame's extra rows aren't cleared
-// and STACK. The worst offender is /clear — it wipes Turn + Activity at once (e.g. 10 lines → 8) →
-// CC under-clears → 2 ghost rows pile up on every /clear. Backfilling missing sections pins the
-// floor at HEIGHT so content-driven shrinkage can't trigger that. (Width-driven shrinkage CAN still
-// happen now that packSection may wrap — that was fixed in fc7cbba, reverted because the underlying
-// CC under-clear was fixed upstream in CC v2.1.170 and wrapping reads better on older versions.)
+// FIXED HEIGHT — the dashboard is ALWAYS exactly HEIGHT + 1 lines (the +1 is the gap row at the
+// bottom). Both directions of drift are real problems:
+//   SHRINK: CC reserves vertical space by the previous render's line count then clears that many
+//   and repaints; if our count DROPS the old frame's extra rows aren't cleared and STACK (worst
+//   offender was /clear wiping Turn + Activity at once → 2 ghost rows per /clear; under-clear
+//   fixed upstream in CC v2.1.170 but kept defensive). Empty sections backfill with blank rows.
+//   GROW: every wrapped line pushes CC's own footer (mode indicator / "← N agent" / context %)
+//   further down — on a short terminal the footer walks off the bottom edge. So wrapping may only
+//   SPEND the blank slots left by empty sections (Turn/Activity after /clear, no-repo Repo, …);
+//   once every slot is full, the tallest wrapped section is re-packed one row shorter (cut with a
+//   trailing " …") until the total fits the budget again.
+// Squeeze ties break by SQUEEZE_ORDER: densest/most-redundant detail loses first, location + host
+// anchors last.
+const SQUEEZE_ORDER = ["config", "exts.", "activity", "turn", "usage", "limits", "model", "repo", "host", "info."];
+{
+  let total = sections.reduce((n, s) => n + s.length, 0);
+  while (total > sectionSpecs.length) {
+    let idx = -1;
+    let tallest = 1;
+    for (const label of SQUEEZE_ORDER) {
+      const i = sectionSpecs.findIndex((s) => s[0] === label);
+      if (i >= 0 && sections[i].length > tallest) {
+        tallest = sections[i].length;
+        idx = i;
+      }
+    }
+    if (idx < 0) break; // nothing left to squeeze (can't happen: ≤1 row each ⇒ total ≤ budget)
+    const [label, segs, lead, leadWidth, preferDetail] = sectionSpecs[idx];
+    sections[idx] = packSection(label, segs, lead ?? "", leadWidth ?? null, preferDetail ?? false, tallest - 1);
+    total = sections.reduce((n, s) => n + s.length, 0);
+  }
+}
+
 const blank = cp(0x2800); // U+2800: non-whitespace, so CC's trailing-blank-row strip preserves it
 const contentRows = sections.flat().filter(Boolean); // the non-empty section lines, in order
 const HEIGHT = sections.length; // one row-slot per section — the fixed line budget
