@@ -19,9 +19,10 @@ files, `/etc/os-release`, etc.), and reflows everything to your terminal width.
 
 Each row is width-aware: it packs onto one line when it fits, wraps to aligned continuation
 lines when it doesn't, and gauges drop their progress bar before anything gets truncated.
-Total height is fixed — wrapping may only spend the blank slots left by empty rows; once every
-slot is full the densest rows are cut with a trailing `…` instead, so the dashboard never grows
-and never pushes Claude Code's own footer off a short terminal.
+Total height is a hard budget sized to your terminal — wrapping may only spend the blank slots
+left by empty rows; once every slot is full the densest rows are cut with a trailing `…`, and on
+short terminals whole rows are shed (least-essential first, the Model/Limits gauges last) so the
+dashboard never pushes Claude Code's own footer off the bottom of the window.
 
 - **Model** — model name (⚡ when fast mode is on), reasoning effort (styled to echo Claude
   Code's `/effort` menu) with a 💡 lamp when extended thinking is on, and a context-window gauge

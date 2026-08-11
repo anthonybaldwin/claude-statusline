@@ -35,16 +35,19 @@ ones. Don't leave the file in a non-running state between edits.
 These exist to dodge real Claude Code rendering bugs; violating them corrupts the user's
 terminal, not just the aesthetics.
 
-1. **Height is CONSTANT — never shrinks, never grows.** Shrink: CC reserves vertical space from
-   the previous render's line count; if the count drops, stale rows stack (under-clear, fixed
-   upstream in CC v2.1.170 but kept defensive). Grow: extra wrapped lines push CC's own footer
-   (mode indicator / agent count) off the bottom of a short terminal. Hence: `sectionSpecs` is a
-   fixed slot list, empty sections backfill with blank rows to `HEIGHT`, wrapping may only spend
-   those blank slots — once every slot is full, the squeeze loop re-packs the tallest section
-   (ties by `SQUEEZE_ORDER`) one row shorter via `packSection`'s `maxRows` (cut with a trailing
-   `…`) — plus one trailing gap row, so total is always exactly `HEIGHT + 1`. **Adding a row =
-   adding one entry to `sectionSpecs`** (and to `SQUEEZE_ORDER`); never conditionally omit a
-   slot.
+1. **Height is a hard budget — constant at a given terminal size, clamped to the terminal.**
+   Shrink between renders: CC reserves vertical space from the previous render's line count; if
+   the count drops, stale rows stack (under-clear, fixed upstream in CC v2.1.170 but kept
+   defensive). Grow: extra wrapped lines push CC's own footer (mode indicator / agent count)
+   down. Short terminal: when the statusline + CC's chrome exceed the window, CC hard-trims our
+   tail AND its own footer (observed v2.1.223) — so we shrink first: CC exports `LINES`, and
+   `HEIGHT` clamps to `LINES - CHROME_RESERVE - 1`. Mechanics: `sectionSpecs` is a fixed slot
+   list, empty sections backfill with blank rows to `HEIGHT`; wrapping may only spend those
+   blank slots — over budget, the squeeze loop re-packs the tallest section (ties by
+   `SQUEEZE_ORDER`) one row shorter via `packSection`'s `maxRows` (cut with a trailing `…`),
+   then whole sections vanish in `DROP_ORDER` — plus one trailing gap row, so total is always
+   exactly `HEIGHT + 1`. **Adding a row = adding one entry to `sectionSpecs`** (and to
+   `SQUEEZE_ORDER` + `DROP_ORDER`); never conditionally omit a slot.
 2. **Lines must never exceed the terminal width.** CC counts logical lines; a terminal
    hard-wrap desyncs its repaint. `packSection` measures with `vlen` (visible width, ANSI- and
    wide-glyph-aware) and degrades per item: widest alt → narrowest alt → wrap to a fresh row.

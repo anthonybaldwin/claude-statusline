@@ -2423,42 +2423,69 @@ const sections = sectionSpecs.map(([label, segs, lead, leadWidth, preferDetail])
   packSection(label, segs, lead ?? "", leadWidth ?? null, preferDetail ?? false),
 );
 
-// FIXED HEIGHT — the dashboard is ALWAYS exactly HEIGHT + 1 lines (the +1 is the gap row at the
-// bottom). Both directions of drift are real problems:
-//   SHRINK: CC reserves vertical space by the previous render's line count then clears that many
-//   and repaints; if our count DROPS the old frame's extra rows aren't cleared and STACK (worst
-//   offender was /clear wiping Turn + Activity at once → 2 ghost rows per /clear; under-clear
-//   fixed upstream in CC v2.1.170 but kept defensive). Empty sections backfill with blank rows.
-//   GROW: every wrapped line pushes CC's own footer (mode indicator / "← N agent" / context %)
-//   further down — on a short terminal the footer walks off the bottom edge. So wrapping may only
-//   SPEND the blank slots left by empty sections (Turn/Activity after /clear, no-repo Repo, …);
-//   once every slot is full, the tallest wrapped section is re-packed one row shorter (cut with a
-//   trailing " …") until the total fits the budget again.
-// Squeeze ties break by SQUEEZE_ORDER: densest/most-redundant detail loses first, location + host
-// anchors last.
+// HEIGHT BUDGET — the dashboard is exactly HEIGHT + 1 lines (the +1 is the gap row), where
+// HEIGHT is the section count clamped to what the TERMINAL can actually spare. Three failure
+// modes drive this:
+//   SHRINK between renders: CC reserves vertical space by the previous render's line count then
+//   clears that many and repaints; if our count DROPS the old frame's extra rows aren't cleared
+//   and STACK (worst offender was /clear wiping Turn + Activity at once → 2 ghost rows per
+//   /clear; under-clear fixed upstream in CC v2.1.170 but kept defensive). Empty sections
+//   backfill with blank rows, so at a given terminal size the height is CONSTANT — it only moves
+//   on an actual window resize, which forces CC into a full reflow/repaint anyway.
+//   GROW past the budget: every wrapped line pushes CC's own footer (mode indicator / "← N
+//   agent") further down. Wrapping may only SPEND the blank slots left by empty sections; once
+//   every slot is full, the tallest wrapped section is re-packed one row shorter (cut with a
+//   trailing " …") until the total fits.
+//   SHORT TERMINAL: CC renders the whole statusline only if it fits under its own chrome —
+//   otherwise it hard-trims our tail AND its own footer/mode line (observed v2.1.223). CC
+//   exports LINES (terminal rows, verified in the live env alongside COLUMNS), so we shrink
+//   FIRST: HEIGHT drops below the section count and whole rows are dropped in DROP_ORDER until
+//   the dashboard + CC's chrome fit. CHROME_RESERVE ≈ prompt box (3) + footer (1) + spinner /
+//   hint rows (~3) + slack; plus our own gap row, separately.
+// SQUEEZE_ORDER (which section loses a WRAPPED line first): densest/most-redundant detail first,
+// location + host anchors last. DROP_ORDER (which section vanishes ENTIRELY on short terminals):
+// ends with the essentials — Info/limits/model survive longest.
 const SQUEEZE_ORDER = ["config", "exts.", "activity", "turn", "usage", "limits", "model", "repo", "host", "info."];
+const DROP_ORDER = ["exts.", "config", "host", "activity", "turn", "repo", "usage", "info.", "limits", "model"];
+const CHROME_RESERVE = 8; // rows kept free below the dashboard for CC's own UI
+const termRows = parseInt(process.env.LINES, 10) || 0; // 0 → unknown (piped tests) → no clamp
+const HEIGHT = termRows > 0
+  ? Math.max(1, Math.min(sectionSpecs.length, termRows - CHROME_RESERVE - 1)) // -1: our gap row
+  : sectionSpecs.length;
 {
+  const specIdx = (label) => sectionSpecs.findIndex((s) => s[0] === label);
   let total = sections.reduce((n, s) => n + s.length, 0);
-  while (total > sectionSpecs.length) {
+  // Pass 1 — squeeze: re-pack the tallest wrapped section one row shorter until we fit (or
+  // every section is down to a single row).
+  while (total > HEIGHT) {
     let idx = -1;
     let tallest = 1;
     for (const label of SQUEEZE_ORDER) {
-      const i = sectionSpecs.findIndex((s) => s[0] === label);
+      const i = specIdx(label);
       if (i >= 0 && sections[i].length > tallest) {
         tallest = sections[i].length;
         idx = i;
       }
     }
-    if (idx < 0) break; // nothing left to squeeze (can't happen: ≤1 row each ⇒ total ≤ budget)
+    if (idx < 0) break; // nothing multi-row left — pass 2 drops whole sections
     const [label, segs, lead, leadWidth, preferDetail] = sectionSpecs[idx];
     sections[idx] = packSection(label, segs, lead ?? "", leadWidth ?? null, preferDetail ?? false, tallest - 1);
     total = sections.reduce((n, s) => n + s.length, 0);
+  }
+  // Pass 2 — drop: on terminals too short for one row per section, whole sections vanish in
+  // DROP_ORDER until the dashboard fits the clamped HEIGHT.
+  for (const label of DROP_ORDER) {
+    if (total <= HEIGHT) break;
+    const i = specIdx(label);
+    if (i >= 0 && sections[i].length > 0) {
+      total -= sections[i].length;
+      sections[i] = [];
+    }
   }
 }
 
 const blank = cp(0x2800); // U+2800: non-whitespace, so CC's trailing-blank-row strip preserves it
 const contentRows = sections.flat().filter(Boolean); // the non-empty section lines, in order
-const HEIGHT = sections.length; // one row-slot per section — the fixed line budget
 // Content packs to the TOP; blank slots backfill to HEIGHT so the gap rides at the BOTTOM (above the
 // prompt) instead of opening holes mid-dashboard. After /clear you briefly see that gap where Turn +
 // Activity were; it heals as soon as you resume work and those rows return — height never changes.
