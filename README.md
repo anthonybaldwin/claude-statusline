@@ -57,6 +57,48 @@ up, never down, so Claude Code's repaint never leaves ghost rows behind.
   sessions, and the session identity: its custom/AI-generated name when one exists, with the
   id (for `claude --resume`) in dim parens.
 
+### Reading the `(0/0/1/0/-)` scope breakdown
+
+Most Config items render as `icon total (m/u/p/l/x)` — a count, then a dim parenthetical that
+says *where* those items come from. The five slots are fixed and always in the same order, from
+broadest to narrowest scope:
+
+| Slot | Scope | Where it lives |
+| --- | --- | --- |
+| `m` | **managed** | Enterprise/org config: `managed-settings.json`, `managed-mcp.json`, or the Windows registry policy. Only non-zero on managed machines. |
+| `u` | **user** | Your `~/.claude/` (settings, agents, skills, …) and top-level `~/.claude.json` — loads in every project. |
+| `p` | **project** | Committed in the repo: `.claude/`, `.mcp.json`, `CLAUDE.md`. Shared with collaborators. |
+| `l` | **local** | Your uncommitted per-project overrides: `.claude/settings.local.json`, `CLAUDE.local.md`, `~/.claude.json` `projects[cwd]`. |
+| `x` | **plugin** | Components bundled by enabled plugins. Lowest precedence. |
+
+Each slot is one of two things:
+
+- **A number** (including `0`) — this item type *can* come from that scope, and this is how many
+  currently do. A `0` means "nothing from here right now".
+- **`-`** — this item type can *never* come from that scope, so the slot is not applicable.
+  Agents, commands, and skills have no managed or local form; rules and routines have no plugin
+  form; and so on.
+
+So `(0/0/1/0/-)` next to the CLAUDE.md icon reads: no managed memory file, none in `~/.claude/`,
+**one `CLAUDE.md` in this repo**, no `CLAUDE.local.md`, and plugins can't provide one. Likewise
+`(-/3/0/-/2)` on skills means three of your own in `~/.claude/skills/`, none in this repo, two shipped by
+plugins — and the dashes because skills have no managed or local form.
+
+Which scopes each item can have:
+
+| Item | Slots that can hold a count |
+| --- | --- |
+| CLAUDE.md, Plugins | `m` `u` `p` `l` |
+| MCP servers, Hooks | `m` `u` `p` `l` `x` |
+| Agents, Commands, Skills, Workflows | `u` `p` `x` |
+| Rules, Routines | `u` `p` |
+| Themes, Channels | `u` `x` |
+
+Items counted at a single location (auto-memory, connectors, chrome, session dirs, and the
+LSP/monitor/bin entries on **Exts.**) show a bare count with no parenthetical. Items whose total is
+`0` also skip it — an all-zero breakdown is just noise. On a narrow terminal the parenthetical is
+the first thing dropped to reclaim width; the total always stays visible.
+
 ## Requirements
 
 - [**Bun**](https://bun.sh) — the script runs under `bun` (uses `Bun.stdin` / `Bun.main`).
