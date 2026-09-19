@@ -1,10 +1,3 @@
-> [!NOTE]
-> **Resolved: statusline/UI clobbering & input cursor jumping** — Claude Code builds `2.1.163`–`2.1.169`
-> had a repaint regression that made the status line and other UI duplicate or stack on screen
-> (anthropics/claude-code#66013, anthropics/claude-code#65989). It was fixed upstream in **`2.1.170`**;
-> current builds render cleanly. If you pinned or downgraded while it was live (`autoUpdatesChannel`,
-> `DISABLE_AUTOUPDATER`, `claude install 2.1.162`), undo those pins.
-
 # claude-statusline
 
 A cross-platform [Claude Code](https://claude.com/claude-code) [status line](https://code.claude.com/docs/en/statusline) — context, cost,
