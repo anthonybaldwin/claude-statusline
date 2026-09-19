@@ -12,6 +12,12 @@ files, `/etc/os-release`, etc.), and reflows everything to your terminal width.
 
 Each row is width-aware: it packs onto one line when it fits, wraps to aligned continuation
 lines when it doesn't, and gauges drop their progress bar before anything gets truncated.
+Height adapts to your terminal, taking at most a third of it — Claude Code needs the rest for
+the conversation, prompt, and its own footer. On a tall window rows wrap freely (nothing
+truncated); as the window shortens, wrapped detail is cut with a trailing `…` first, then whole
+rows are shed (least-essential first, the Model/Limits gauges last) so the dashboard never
+pushes Claude Code's own footer off the bottom. Within one window size the height only ratchets
+up, never down, so Claude Code's repaint never leaves ghost rows behind.
 
 - **Model** — model name (⚡ when fast mode is on), reasoning effort (styled to echo Claude
   Code's `/effort` menu) with a 💡 lamp when extended thinking is on, and a context-window gauge
@@ -23,19 +29,26 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   0–100% scale. Each windowed gauge carries a signed pace balance vs the even-consumption budget
   line: `+N%` = quota in hand (green), `-N%` = burning ahead of pace (yellow). A `Cr` gauge
   (monthly usage-credit spend, `$used/$limit`) appears only once credits actually start being
-  consumed.
+  consumed. Behind a [Claude apps gateway](https://code.claude.com/docs/en/claude-apps-gateway-spend-limits),
+  an `Sp` gauge shows your spend-limit usage (`rate_limits.spend_limit`, Claude Code ≥ 2.1.251) —
+  it keeps counting past 100% once you're over the cap, with the period's reset date.
 - **Usage** — total session cost, `$/h` burn rate, throughput (tok/s), API time, and wall-clock.
-- **Turn** — the last call's token makeup: input / output / cache-write / cache-read.
+- **Turn** — the last call's token makeup: input / output / cache-write / cache-read; then the
+  session's prompt-cache health (`prompt_cache`, Claude Code ≥ 2.1.251): hit ratio, `warm` with
+  time left on the TTL or `cold` with what the next request will re-cache, and a yellow miss
+  count with the likely cause of the last miss (e.g. `tools changed`) when there's room.
 - **Activity** — active slash command, todo progress, last tool call, sub-agents (each running
   agent with its own task count, plus a green ✔ tally of completed ones), and the session's edit
   volume (+added / −removed lines).
 - **Repo** — *(only inside a git repo)* project name, origin-remote identity (host-branded
   GitHub/GitLab/Bitbucket badge + `owner`, or `owner/name` when the remote name differs from the
   folder), worktree, branch with ahead/behind and staged/modified/untracked/conflict counts, the
-  current branch's open PR (colored by review state), and the latest `v*` tag with commits-since.
+  current branch's open PR — or GitLab merge request, shown as `!N` — colored by review state,
+  and the latest `v*` tag with commits-since.
 - **Config** — what's actually loaded, each broken down by Claude Code's real config scopes
   **(managed / user / project / local / plugin)**, de-duped by precedence and gated on workspace
-  trust: CLAUDE.md memory, auto-memory files (this project's `~/.claude/projects/<slug>/memory/`),
+  trust: instruction files (CLAUDE.md, plus AGENTS.md wherever Claude Code ≥ 2.1.277 loads it
+  natively — honoring the *Project instructions* setting), auto-memory files (this project's `~/.claude/projects/<slug>/memory/`),
   agents, commands, skills (incl. output-styles), workflows, routines, rules, MCP servers,
   claude.ai connectors, claude-in-chrome, hooks, plugins, themes (plugin or your own
   `~/.claude/themes/`), and session-added dirs.
@@ -43,11 +56,55 @@ lines when it doesn't, and gauges drop their progress bar before anything gets t
   same as Config): LSP servers, background monitors, `bin/` executables, and message channels.
   Counts include components declared inline in a plugin's **marketplace entry**, not just in the
   plugin's own files (which is how the official LSP plugins ship them).
-- **Host** — local clock, OS badge with real version, and `user@host`.
+- **Host** — local clock, OS badge with real version, `user@host`, and a fleet count of *other*
+  live Claude Code sessions on this machine (the same population as the `← N agent` count in
+  Claude Code's own footer; hidden at 0).
 - **Info.** — current directory (home-relativized, leaf preserved when long), vim mode,
   output style, Claude Code version, agent name, a `remote` cloud marker for remote-attached
   sessions, and the session identity: its custom/AI-generated name when one exists, with the
   id (for `claude --resume`) in dim parens.
+
+### Reading the `(0/0/1/0/-)` scope breakdown
+
+Most Config items render as `icon total (m/u/p/l/x)` — a count, then a dim parenthetical that
+says *where* those items come from. The five slots are fixed and always in the same order, from
+broadest to narrowest scope:
+
+| Slot | Scope | Where it lives |
+| --- | --- | --- |
+| `m` | **managed** | Enterprise/org config: `managed-settings.json`, `managed-mcp.json`, or the Windows registry policy. Only non-zero on managed machines. |
+| `u` | **user** | Your `~/.claude/` (settings, agents, skills, …) and top-level `~/.claude.json` — loads in every project. |
+| `p` | **project** | Committed in the repo: `.claude/`, `.mcp.json`, `CLAUDE.md`. Shared with collaborators. |
+| `l` | **local** | Your uncommitted per-project overrides: `.claude/settings.local.json`, `CLAUDE.local.md`, `~/.claude.json` `projects[cwd]`. |
+| `x` | **plugin** | Components bundled by enabled plugins. Lowest precedence. |
+
+Each slot is one of two things:
+
+- **A number** (including `0`) — this item type *can* come from that scope, and this is how many
+  currently do. A `0` means "nothing from here right now".
+- **`-`** — this item type can *never* come from that scope, so the slot is not applicable.
+  Agents, commands, and skills have no managed or local form; rules and routines have no plugin
+  form; and so on.
+
+So `(0/0/1/0/-)` next to the CLAUDE.md icon reads: no managed memory file, none in `~/.claude/`,
+**one `CLAUDE.md` in this repo**, no `CLAUDE.local.md`, and plugins can't provide one. Likewise
+`(-/3/0/-/2)` on skills means three of your own in `~/.claude/skills/`, none in this repo, two shipped by
+plugins — and the dashes because skills have no managed or local form.
+
+Which scopes each item can have:
+
+| Item | Slots that can hold a count |
+| --- | --- |
+| CLAUDE.md, Plugins | `m` `u` `p` `l` |
+| MCP servers, Hooks | `m` `u` `p` `l` `x` |
+| Agents, Commands, Skills, Workflows | `u` `p` `x` |
+| Rules, Routines | `u` `p` |
+| Themes, Channels | `u` `x` |
+
+Items counted at a single location (auto-memory, connectors, chrome, session dirs, and the
+LSP/monitor/bin entries on **Exts.**) show a bare count with no parenthetical. Items whose total is
+`0` also skip it — an all-zero breakdown is just noise. On a narrow terminal the parenthetical is
+the first thing dropped to reclaim width; the total always stays visible.
 
 ## Requirements
 

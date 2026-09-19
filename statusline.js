@@ -67,6 +67,7 @@ const gWin = cp(0xf05b3); // nf-md-microsoft_windows
 const gApple = cp(0xf0035); // nf-md-apple
 const gLinux = cp(0xf17c); // nf-fa-linux (Tux) — only ever renders on Linux, so the Win-font FA-tofu gotcha doesn't apply here
 const gPerson = cp(0xf0004); // nf-md-account (MD — the FA user glyph is tofu in the Windows font)
+const gFleet = cp(0xf037a); // nf-md-monitor_multiple — OTHER live Claude Code sessions on this machine
 const gVim = cp(0xe62b); // nf-dev-vim
 const gCommand = cp(0xf120); // nf-fa-terminal
 const gPeak = cp(0xf185); // nf-fa-sun_o
@@ -82,8 +83,9 @@ const gIn = cp(0xf090); // nf-fa-sign_in (input tokens)
 const gOut = cp(0xf08b); // nf-fa-sign_out (output tokens)
 const gWrite = cp(0xf0ee); // nf-fa-cloud_upload (cache write)
 const gRead = cp(0xf0ed); // nf-fa-cloud_download (cache read)
+const gPromptCache = cp(0xf00e8); // nf-md-cached — session prompt-cache health (Turn row); codepoint verified against glyphnames.json
 // Config-row icons — ALL Material Design (nf-md-*); Font Awesome renders blank in this font.
-const gCfgDoc = cp(0xf0219); // nf-md-file_document — CLAUDE.md/AGENTS.md (paired with a C/A letter)
+const gCfgDoc = cp(0xf0219); // nf-md-file_document — instruction files (CLAUDE.md + natively-loaded AGENTS.md)
 const gCfgAgents = cp(0xf167a); // nf-md-robot_outline
 const gCfgCmds = cp(0xf018d); // nf-md-console
 const gCfgSkills = cp(0xf0068); // nf-md-auto_fix (magic wand)
@@ -172,6 +174,13 @@ function formatResetTime(ts, fmt = "HH:mm") {
     const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
     const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
     if (fmt === "ddd HH:mm") return `${wd} ${hm}`;
+    // "date": for periods LONGER than a week (spend-limit billing periods), where a bare weekday is
+    // ambiguous — "Sep 30" while the reset is ≥6 days out, then the usual weekday + time.
+    if (fmt === "date") {
+      if (d.getTime() - Date.now() < 6 * 24 * 3600e3) return `${wd} ${hm}`;
+      const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+      return `${mon} ${d.getDate()}`;
+    }
     // "auto": time only, but prepend the weekday when the reset falls on a DIFFERENT calendar
     // day than now (e.g. a 5h window that rolls past midnight → "Tue 01:00" instead of "01:00").
     if (fmt === "auto") {
@@ -230,6 +239,19 @@ function formatCost(cost) {
 function truncate(value, maxLen) {
   const s = String(value || "").replace(/\s+/g, " ").trim();
   return s.length <= maxLen ? s : `${s.slice(0, Math.max(0, maxLen - 3))}...`;
+}
+
+// Dotted-numeric version compare ("2.1.277" ≥ "2.1.260"). Unknown/absent version → false, so a
+// version-gated behavior stays OFF when we can't tell which Claude Code is feeding us.
+function versionAtLeast(version, min) {
+  const parse = (v) => String(v || "").split(".").map((n) => parseInt(n, 10));
+  const a = parse(version);
+  const b = parse(min);
+  if (!a.length || a.some((n) => !Number.isFinite(n))) return false;
+  for (let i = 0; i < b.length; i++) {
+    if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i];
+  }
+  return true;
 }
 
 function percent(current, total) {
@@ -450,7 +472,13 @@ function readRegManaged() {
 function detectManaged() {
   const dir = managedDir();
   const settings = readRegManaged() || readJson(join(dir, "managed-settings.json")) || null;
-  const mcpServers = { ...(readJson(join(dir, "managed-mcp.json"))?.mcpServers || {}), ...(settings?.mcpServers || {}) };
+  // `managedMcpServers` (managed-settings key, CC v2.1.259+): org-provided REMOTE servers layered
+  // alongside the user's own. http/sse only — CC drops any entry without an https:// `url` (a
+  // `command` entry is skipped), so mirror that filter or a rejected entry would inflate the count.
+  const provided = Object.fromEntries(
+    Object.entries(settings?.managedMcpServers || {}).filter(([, v]) => /^https:\/\//i.test(String(v?.url || "")) && !v?.command),
+  );
+  const mcpServers = { ...(readJson(join(dir, "managed-mcp.json"))?.mcpServers || {}), ...(settings?.mcpServers || {}), ...provided };
   const claudeMd = existsSync(join(dir, "CLAUDE.md")) || !!settings?.claudeMd;
   return { dir, settings, mcpServers, claudeMd };
 }
@@ -513,7 +541,7 @@ function mcpBreakdown(projectDir, currentDir, managed, state) {
   // precedence Local > Project > User: count each server once, at its highest-precedence source.
   for (const k of local) { project.delete(k); user.delete(k); }
   for (const k of project) user.delete(k);
-  const m = Object.keys(managed?.mcpServers || {}).length; // managed-mcp.json + managed settings mcpServers
+  const m = Object.keys(managed?.mcpServers || {}).length; // managed-mcp.json + managed settings mcpServers/managedMcpServers
   return { m, u: user.size, p: project.size, l: local.size };
 }
 
@@ -885,7 +913,7 @@ function memoryDir(transcriptPath, mainRoot, launchDir, scopeSettings) {
 }
 
 // Each entry is a per-scope {m,u,p,l} breakdown (see the scope helpers above for what each means).
-function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir, transcriptPath) {
+function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir, transcriptPath, ccVersion) {
   if (!projectDir) return null;
   const managed = detectManaged();
   // PROJECT/LOCAL scope reads from `projDir` (the project root). If that root IS the user's home
@@ -913,17 +941,54 @@ function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir, tr
     if (out === null) return 0;
     return out.split("\n").filter((l) => l.trim() !== "").length;
   };
-  // CLAUDE.md memory files, counted per scope (each is a distinct file that loads into context):
+  // Instruction files (CLAUDE.md + natively-loaded AGENTS.md), counted per scope — each is a
+  // distinct file that loads into context:
   // m = managed (<managedDir>/CLAUDE.md or the `claudeMd` key in managed settings/registry) ·
   // u = user (~/.claude/CLAUDE.md) · p = repo recursive committed count · l = CLAUDE.local.md.
-  // Summed + shown like every other widget. AGENTS.md is NOT counted: Claude Code reads CLAUDE.md
-  // only — AGENTS.md loads solely if a CLAUDE.md @-imports it.
-  const claudeMd = () => ({
-    m: managed.claudeMd ? 1 : 0,
-    u: existsSync(join(HOME, ".claude", "CLAUDE.md")) ? 1 : 0,
-    p: docCount("CLAUDE.md"),
-    l: projDir && existsSync(join(projDir, "CLAUDE.local.md")) ? 1 : 0,
-  });
+  // AGENTS.md: CC v2.1.277+ reads it NATIVELY (before that it loaded only via a CLAUDE.md @-import,
+  // which we can't see and never counted). Which files load is the built-in agents-md plugin's
+  // `instructionFiles` option — read from managed > user settings ONLY (CC ignores it in project/
+  // local files):
+  //   claude-md-or-agents-md (default) — AGENTS.md ONLY when no CLAUDE.md, .claude/CLAUDE.md or
+  //       CLAUDE.local.md sits in the project root or any dir above it (~/.claude/CLAUDE.md and
+  //       the managed one don't count for that check, and keep loading alongside)
+  //   claude-md-and-agents-md — both together · claude-md — never AGENTS.md
+  //   managed-only — only the managed CLAUDE.md (+ auto memory); u/p/l all drop out
+  // Off entirely under disableAllHooks / allowManagedHooksOnly (it's a plugin). NOT detectable
+  // from here: the feature-flag gate (Bedrock/Vertex/telemetry-off sessions) and the first session
+  // after an upgrade — there the count can read one high until a CLAUDE.md exists.
+  const claudeMd = () => {
+    const userSettings = readJson(join(HOME, ".claude", "settings.json"));
+    const pickU = (key) => managed?.settings?.[key] ?? userSettings?.[key];
+    const agentsNative =
+      versionAtLeast(ccVersion, "2.1.277") &&
+      pickU("disableAllHooks") !== true &&
+      managed?.settings?.allowManagedHooksOnly !== true;
+    const optOf = (st) => st?.pluginConfigs?.["agents-md@builtin"]?.options?.instructionFiles;
+    const mode = agentsNative ? optOf(managed?.settings) || optOf(userSettings) || "claude-md-or-agents-md" : "claude-md";
+    const c = {
+      m: managed.claudeMd ? 1 : 0,
+      u: existsSync(join(HOME, ".claude", "CLAUDE.md")) ? 1 : 0,
+      p: docCount("CLAUDE.md"),
+      l: projDir && existsSync(join(projDir, "CLAUDE.local.md")) ? 1 : 0,
+    };
+    if (mode === "managed-only") return { ...c, u: 0, p: 0, l: 0 };
+    if (mode === "claude-md-and-agents-md") c.p += docCount("AGENTS.md");
+    else if (mode === "claude-md-or-agents-md" && projDir) {
+      // Walk root-ward from the project root looking for any CLAUDE.md that suppresses AGENTS.md.
+      let shadowed = false;
+      for (let d = projDir, prev = ""; d && d !== prev; prev = d, d = dirname(d)) {
+        const isHome = norm(d) === norm(HOME); // ~/.claude/CLAUDE.md is USER scope — doesn't count
+        if (
+          existsSync(join(d, "CLAUDE.md")) ||
+          existsSync(join(d, "CLAUDE.local.md")) ||
+          (!isHome && existsSync(join(d, ".claude", "CLAUDE.md")))
+        ) { shadowed = true; break; }
+      }
+      if (!shadowed) c.p += docCount("AGENTS.md");
+    }
+    return c;
+  };
   // Build the EXECUTABLE project/local-bearing breakdowns, then zero their project/local slots when
   // untrusted (they don't load). CONTENT items (rules, styles, CLAUDE.md) are built un-gated below.
   const hooks = withX(hooksBreakdown(projDir, managed), plug.hooks);
@@ -1509,9 +1574,10 @@ function rlBlock(node, label, fmt, windowMs) {
 }
 
 // Per-model weekly limits + usage-credit spend live only behind the OAuth usage API (not in
-// stdin — verified against the v2.1.226 payload builder: rate_limits carries ONLY five_hour +
-// seven_day). Read the OAuth token and fetch it, but cache the result with a TTL so we hit the
-// API at most once per window.
+// stdin — verified against the v2.1.226 payload builder, and still true per the v2.1.278 docs:
+// rate_limits carries ONLY five_hour + seven_day, plus the gateway-only spend_limit). Read the
+// OAuth token and fetch it, but cache the result with a TTL so we hit the API at most once per
+// window.
 function readOauthToken() {
   try {
     if (process.platform === "darwin") {
@@ -1612,7 +1678,7 @@ async function fetchUsage(ttlMs = USAGE_TTL_MS) {
 if (process.env.CLAUDE_STATUSLINE_USAGE_REFRESH === "1") {
   await fetchUsage();
   // Piggyback a temp sweep on this out-of-band run (never costs the render path anything):
-  // sl-acc-* accumulators are one file PER SESSION and would pile up forever — TEMP isn't
+  // sl-acc-* accumulators + sl-hwm-* height marks are one file PER SESSION and would pile up forever — TEMP isn't
   // auto-cleaned on Windows. >7 days since last write = dead session (live ones rewrite every
   // few renders). Stale sl-cache-* entries are caches; worst case is one recompute.
   try {
@@ -1620,7 +1686,7 @@ if (process.env.CLAUDE_STATUSLINE_USAGE_REFRESH === "1") {
     const tmp = (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/");
     const cutoff = Date.now() - 7 * 24 * 3600e3;
     for (const name of fs.readdirSync(tmp)) {
-      if (!/^sl-(acc|cache)-.*\.json$/.test(name)) continue;
+      if (!/^sl-(acc|cache|hwm)-.*\.json$/.test(name)) continue;
       const path = tmp + "/" + name;
       try {
         if (fs.statSync(path).mtimeMs < cutoff) fs.unlinkSync(path);
@@ -1686,14 +1752,24 @@ const elapsedMs = typeof data.cost?.total_duration_ms === "number" && data.cost.
     : 0;
 const elapsedMinutes = elapsedMs / 60000;
 
-// rate_limits stdin only exposes five_hour + seven_day (verified in the v2.1.226 payload builder;
-// seven_day covers all models). Per-model scoped weeklies + usage credits are API-only (below).
+// rate_limits stdin exposes the subscription windows five_hour + seven_day (seven_day covers all
+// models; verified in the v2.1.226 payload builder) and, since v2.1.251, `spend_limit` for users
+// behind a Claude apps gateway. Per-model scoped weeklies + usage credits are API-only (below).
+// Each window may be independently absent — CC drops one once its resets_at passes.
 const rl5 = rlBlock(data.rate_limits?.five_hour, "5h", "auto", 5 * 3600e3); // day abbrev only if it rolls to next day
 const rl7 = rlBlock(data.rate_limits?.seven_day, "7d", "ddd HH:mm", 7 * 24 * 3600e3);
+// SPEND LIMIT (gateway): % of the spend cap that applies to you + when its period resets. The
+// period LENGTH isn't in the payload, so there's no budget line to pace against (windowMs 0 → no
+// pace suffix), and the percentage runs PAST 100 once over the cap — shown verbatim in red; the
+// bar clamps itself. Distinct from `Cr` below, which is claude.ai usage-credit overage in dollars.
+const rlSp = rlBlock(data.rate_limits?.spend_limit, "Sp", "date", 0);
 // The extra gauges are API-only — only bother for Pro/Max sessions (rate_limits present in stdin).
+// A gateway session carries spend_limit ALONE and has no claude.ai OAuth usage to read — skip it
+// (but an EMPTY rate_limits still counts as Pro/Max: CC drops both windows right after they reset).
 // Serve the cached response INSTANTLY; refresh out-of-band when stale (never await the network here).
 let usageData = null;
-if (data.rate_limits) {
+const rlIn = data.rate_limits;
+if (rlIn && !(rlIn.spend_limit && !rlIn.five_hour && !rlIn.seven_day)) {
   const cached = readUsageCache();
   usageData = cached.data;
   if (!cached.fresh) spawnUsageRefresh();
@@ -1742,7 +1818,7 @@ let crBlock = null;
     crBlock = [p, full, compact];
   }
 }
-const rlBlocks = [rl5, rl7, ...scopedBlocks, crBlock].filter(Boolean);
+const rlBlocks = [rl5, rl7, ...scopedBlocks, rlSp, crBlock].filter(Boolean);
 
 let gitStr = "no branch";
 let repoRoot = currentDir; // working-tree root (the worktree's OWN dir when in a linked worktree)
@@ -1876,6 +1952,47 @@ if (usage) {
   if (tokenParts.length) turnSegs.push(tokenParts.join(` ${SOFT}|${RESET} `));
 }
 
+// Prompt-cache health for the MAIN conversation (stdin `prompt_cache`, CC v2.1.251+; absent until
+// the first API response, subagent requests excluded). Sits on Turn because it explains the W/R
+// split beside it: R dominating = cache working, a fat W = something re-cached. Three terse facts:
+//   hit%   — cache reads ÷ ALL input tokens this session (null while counts are zero). Green ≥80,
+//            yellow <50: a long session stuck low is paying full price for its own history.
+//   state  — warm + time left on the TTL (expires_at; CC itself re-runs us at expiry, so this flips
+//            to cold on time without refreshInterval), or cold + what the next request re-caches
+//            (recache_tokens_if_cold) — the cost of having walked away.
+//   misses — requests that re-processed content the cache already held, with the likely cause of
+//            the LAST one (last_miss_cause, v2.1.260+) in the wide form only. expected_rebuilds
+//            (post-compaction) are deliberately not counted — those are CC working as designed.
+// caching_observed:false = caching off or a gateway that doesn't report it → nothing worth showing.
+const pc = data.prompt_cache;
+if (pc && typeof pc === "object" && pc.caching_observed !== false) {
+  const bits = [];
+  const hr = Number(pc.hit_ratio);
+  if (pc.hit_ratio != null && Number.isFinite(hr)) {
+    const hp = Math.round(hr * 100);
+    bits.push(`${hp >= 80 ? GREEN : hp < 50 ? YELLOW : VAL}${hp}%${RESET}`);
+  }
+  if (pc.warm === true) {
+    const left = toEpochMs(pc.expires_at) - Date.now();
+    bits.push(`${VAL}warm${RESET}${left > 0 ? ` ${SOFT}${formatCountdown(left)}${RESET}` : ""}`);
+  } else if (pc.warm === false) {
+    const recache = Number(pc.recache_tokens_if_cold) || 0;
+    bits.push(`${DIM}cold${RESET}${recache > 0 ? ` ${DIM}~${formatTokens(recache)}${RESET}` : ""}`);
+  }
+  if (bits.length) {
+    const head = `${c256(45)}${gPromptCache}${RESET} ${bits.join(" ")}`;
+    const misses = Number(pc.misses) || 0;
+    if (misses > 0) {
+      const miss = ` ${YELLOW}${misses} miss${RESET}`;
+      const causes = Array.isArray(pc.last_miss_cause?.causes) ? pc.last_miss_cause.causes.filter((c) => typeof c === "string") : [];
+      const why = causes.length ? ` ${DIM}(${truncate(causes.join(",").replace(/_/g, " "), 28)})${RESET}` : "";
+      turnSegs.push(why ? { alts: [head + miss + why, head + miss] } : head + miss);
+    } else {
+      turnSegs.push(head);
+    }
+  }
+}
+
 const stateSegs = [];
 
 // CWD — the literal current directory (home-relativized to ~/…, leaf preserved when long). Leads the
@@ -1905,6 +2022,32 @@ const hostSegs = [];
   if (user || host) {
     const idStr = user && host ? `${VAL}${user}${DIM}@${VAL}${host}${RESET}` : `${VAL}${user || host}${RESET}`;
     hostSegs.push(`${c256(114)}${gPerson}${RESET} ${idStr}`);
+  }
+
+  // Fleet — OTHER live Claude Code sessions on this machine; the same population behind the
+  // "← N agent" count in CC's own footer (which is other SESSIONS, not this session's subagents
+  // and not agent-definition files — those are the Activity robot and the Config robot). CC
+  // registers every running process in ~/.claude/sessions/<pid>.json (undocumented; observed in
+  // v2.1.223: {pid, sessionId, cwd, name, status, ...}). Registry files can outlive a crashed
+  // process, so an entry only counts after a signal-0 probe proves its pid is still alive.
+  // Excluded by sessionId (not pid) so a respawned-in-place session can't count itself. Hidden
+  // at 0 — an always-on "no other sessions" widget is noise.
+  {
+    const others = [];
+    let regFiles = [];
+    try { regFiles = readdirSync(join(HOME, ".claude", "sessions")); } catch {}
+    for (const f of regFiles) {
+      if (!f.endsWith(".json")) continue;
+      const s = readJson(join(HOME, ".claude", "sessions", f));
+      if (!s?.pid || !s.sessionId || s.sessionId === sid) continue;
+      try { process.kill(s.pid, 0); } catch { continue; } // stale registry file — process is gone
+      others.push(s.name || String(s.pid));
+    }
+    if (others.length > 0) {
+      const head = `${c256(110)}${gFleet}${RESET} ${VAL}${others.length}${RESET}`;
+      const list = others.slice(0, 2).join(", ") + (others.length > 2 ? ", …" : "");
+      hostSegs.push({ alts: [`${head} ${DIM}(${list})${RESET}`, head] });
+    }
   }
 }
 const outputStyle = data.output_style?.name;
@@ -2059,7 +2202,12 @@ if (inRepo) {
     else if (rs.includes("change")) { prColor = RED; mark = ` ${RED}${gX}${RESET}`; }
     else if (rs.includes("draft")) { prColor = DIM; mark = ` ${DIM}draft${RESET}`; }
     else if (rs.includes("pending") || rs.includes("review") || rs.includes("required")) { prColor = YELLOW; mark = ` ${YELLOW}●${RESET}`; }
-    const label = prData.number != null ? `#${prData.number}` : "PR";
+    // GitLab (CC v2.1.234+): on a GitLab remote with an authed `glab`, CC fills `pr` from the
+    // branch's open MERGE REQUEST and sets `kind: "mr"` (absent for GitHub PRs). GitLab writes MRs
+    // as !N — match CC's own footer badge. review_state is already mapped onto the PR enum upstream
+    // (mergeable → approved, other open → pending, draft → draft), so the coloring above holds.
+    const isMr = String(prData.kind || "").toLowerCase() === "mr";
+    const label = prData.number != null ? `${isMr ? "!" : "#"}${prData.number}` : isMr ? "MR" : "PR";
     const extra = prList.length > 1 ? ` ${SOFT}+${prList.length - 1}${RESET}` : "";
     locSegs.push(`${MAGENTA}${gPR}${RESET} ${prColor}${label}${RESET}${mark}${extra}`);
   }
@@ -2120,8 +2268,10 @@ const counts = displayRoot
       ],
       // extraSig: added-dir count + the auto-memory kill switch — the env var isn't a watchable
       // file, so it must join the signature or a toggle would keep serving the cached counts.
-      addedDirCount + "|" + (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY || ""),
-      () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot, launchDir, data.transcript_path)
+      // data.version joins too: native AGENTS.md loading is version-gated (v2.1.277+), so a CC
+      // upgrade must not keep serving counts computed under the old rules.
+      addedDirCount + "|" + (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY || "") + "|" + (data.version || ""),
+      () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot, launchDir, data.transcript_path, data.version)
     )
   : null;
 // config gets its OWN row (own section). Numeric counts (no ✓/✗). Repo-relative docs
@@ -2157,8 +2307,9 @@ if (counts) {
   // Every config widget renders its icon + count (0 included) so an empty category shows at a
   // glance; the breakdown parens appear only once total>0 (an all-0/"-" breakdown is just noise).
   const show = (head, c, opts) => configSegs.push(seg(head, c, opts));
-  // CLAUDE.md — doc icon, NO letter (AGENTS.md isn't loaded natively by CC, so there's nothing to
-  // disambiguate from). Counted like every other widget now: total across the scopes it CAN have,
+  // Instruction files — doc icon, NO letter: CLAUDE.md plus any AGENTS.md CC loads natively
+  // (v2.1.277+, see configCounts) fold into ONE count — both are "project instructions in context",
+  // and which flavor a repo uses isn't worth a second widget. Counted like every other widget: total across the scopes it CAN have,
   // breakdown showing where they live. caps "mupl" — managed/user/project/local; plugins don't
   // provide CLAUDE.md → "-".
   show(gCfgDoc, counts.claude, { color: c256(36), breakdown: true, caps: "mupl" }); // teal
@@ -2283,10 +2434,13 @@ const SEP = " | ";
 // `preferDetail` (default false) flips off the all-narrowest one-line pass. The Config row passes
 // true so its (m/u/p/l/x) breakdowns stay attached to items that wrap, instead of the whole row
 // collapsing to bare counts.
+// `maxRows` (default Infinity) caps how many lines the section may emit: when the greedy pass
+// would wrap past the budget it CUTS instead — the finished row ends in " …" and the remaining
+// items are dropped. Used by the total-height cap below (see HEIGHT), never passed directly.
 // (NOTE: between fc7cbba and the 2026-06-12 revert, packSection was fixed-height / truncate-only to
 // dodge a Claude Code resize-stacking under-clear; that bug was fixed upstream in CC v2.1.170, so
 // wrapping is back. Multi-row sections still trigger the under-clear on PRE-2.1.170 CC versions.)
-function packSection(label, segments, lead = "", leadWidth = null, preferDetail = false) {
+function packSection(label, segments, lead = "", leadWidth = null, preferDetail = false, maxRows = Infinity) {
   if (!segments.length) return [];
 
   const items = toItems(segments);
@@ -2333,6 +2487,12 @@ function packSection(label, segments, lead = "", leadWidth = null, preferDetail 
       cur += SEP + narrow;
       curLen += sepLen + narrowLen;
     } else {
+      // Row budget spent → CUT instead of wrapping: end the current row with an ellipsis (the
+      // " |" continuation marker would promise a next line that isn't coming) and drop the rest.
+      if (rows.length + 2 > maxRows) {
+        if (curLen + 2 <= width) cur += ` ${SOFT}…${RESET}`;
+        break;
+      }
       // Wrap. Place widest on the new row; only if widest itself overflows do we degrade — to
       // narrow if it fits, else truncate (single-alt items only).
       if (placed > 0) {
@@ -2363,38 +2523,112 @@ function packSection(label, segments, lead = "", leadWidth = null, preferDetail 
 }
 
 // One ENTRY PER SECTION; each packSection emits 0, 1, or (when the row is too wide even after
-// dropping bars + scope-breakdown parens) multiple wrapped lines. Built as a slot list so the row
-// budget is the SECTION COUNT, a constant for the empty-slot floor (see HEIGHT below) — even
-// though wrapping can push the actual height above it.
-const sections = [
+// dropping bars + scope-breakdown parens) multiple wrapped lines. Kept as [label, segs, ...args]
+// SPECS (not packed results) so the height cap below can RE-pack an over-budget section with a
+// tighter maxRows. The spec count is the fixed line budget (see HEIGHT below).
+const sectionSpecs = [
   // Label ≠ var name for a few (renamed for clearer categories): session→Model, rate→Usage,
   // work→Repo. Vars kept to limit churn.
-  packSection("model", sessionSegs),
-  packSection("limits", quotaSegs, limitLead, limitLeadW),
-  packSection("usage", rateSegs),
-  packSection("turn", turnSegs),
-  packSection("activity", activitySegs),
-  packSection("repo", locSegs),
-  packSection("config", configSegs, "", null, true), // preferDetail: keep (m/u/p/l/x) breakdowns attached to wrapped items instead of collapsing to bare counts
-  packSection("exts.", componentSegs),
-  packSection("host", hostSegs),
+  ["model", sessionSegs],
+  ["limits", quotaSegs, limitLead, limitLeadW],
+  ["usage", rateSegs],
+  ["turn", turnSegs],
+  ["activity", activitySegs],
+  ["repo", locSegs],
+  ["config", configSegs, "", null, true], // preferDetail: keep (m/u/p/l/x) breakdowns attached to wrapped items instead of collapsing to bare counts
+  ["exts.", componentSegs],
+  ["host", hostSegs],
   // "Info." row LAST — nearest the prompt. Leads with the CWD (always-present location anchor — the
   // Repo row above is repo-only now), then vim mode (where CC's native "-- INSERT --" used to sit),
   // output-style, version, agent name, and session id.
-  packSection("info.", stateSegs),
+  ["info.", stateSegs],
 ];
+const sections = sectionSpecs.map(([label, segs, lead, leadWidth, preferDetail]) =>
+  packSection(label, segs, lead ?? "", leadWidth ?? null, preferDetail ?? false),
+);
 
-// MINIMUM HEIGHT — pad empty section slots up to the section count so the dashboard never SHRINKS
-// between renders. CC reserves vertical space by the previous render's line count then clears that
-// many and repaints; if our count DROPS between renders the old frame's extra rows aren't cleared
-// and STACK. The worst offender is /clear — it wipes Turn + Activity at once (e.g. 10 lines → 8) →
-// CC under-clears → 2 ghost rows pile up on every /clear. Backfilling missing sections pins the
-// floor at HEIGHT so content-driven shrinkage can't trigger that. (Width-driven shrinkage CAN still
-// happen now that packSection may wrap — that was fixed in fc7cbba, reverted because the underlying
-// CC under-clear was fixed upstream in CC v2.1.170 and wrapping reads better on older versions.)
+// HEIGHT BUDGET — how many CONTENT rows the dashboard may emit (total output is that + 1 gap
+// row). Three failure modes drive this:
+//   SHRINK between renders: CC reserves vertical space by the previous render's line count then
+//   clears that many and repaints; if our count DROPS the old frame's extra rows aren't cleared
+//   and STACK (worst offender was /clear wiping Turn + Activity at once → 2 ghost rows per
+//   /clear; under-clear fixed upstream in CC v2.1.170 but kept defensive). Guarded two ways:
+//   empty sections backfill with blank rows up to the slot floor, and a per-session HIGH-WATER
+//   MARK (sl-hwm-*.json, keyed to the terminal geometry) pads renders up to the tallest height
+//   already shown — so once a wrap grows the dashboard, later wrap-free renders keep the height
+//   instead of shrinking. The mark resets when COLUMNS/LINES change (a resize forces CC into a
+//   full repaint anyway).
+//   SHORT TERMINAL: CC gives the statusline whatever remains AFTER the current turn's
+//   transcript tail + prompt box + its own footer — and when that's less than our height it
+//   hard-trims our tail AND the footer/mode line rather than scrolling (observed v2.1.223,
+//   102×26 split pane: a 13-line dashboard got ~9 rows, cut stayed until the turn content
+//   scrolled). The transcript share is unknowable per-render, so budget by proportion instead:
+//   the dashboard takes at most a THIRD of LINES (CC's terminal-height belief, exported
+//   alongside COLUMNS — trust it even when the real pane is bigger, because CC lays out and
+//   trims by its belief). Over budget: wrapped rows are squeezed out (cut with a trailing
+//   " …"), then whole sections drop in DROP_ORDER.
+//   RUNAWAY GROWTH on tall terminals: wraps are welcome when LINES has room (that's the whole
+//   point of a tall window — no "…" data loss), but bounded by WRAP_HEADROOM extra rows past the
+//   section count so a pathological wrap can't produce a 20-line dashboard.
+// SQUEEZE_ORDER (which section loses a WRAPPED line first): densest/most-redundant detail first,
+// location + host anchors last. DROP_ORDER (which section vanishes ENTIRELY on short terminals):
+// ends with the essentials — Info/Limits/Model survive longest.
+const SQUEEZE_ORDER = ["config", "exts.", "activity", "turn", "usage", "limits", "model", "repo", "host", "info."];
+const DROP_ORDER = ["exts.", "config", "host", "activity", "turn", "repo", "usage", "info.", "limits", "model"];
+const WRAP_HEADROOM = 4; // max wrap rows past the section count, even on a very tall terminal
+const termRows = parseInt(process.env.LINES, 10) || 0; // 0 → unknown (piped tests) → treat as roomy
+const maxContent = Math.min(
+  sectionSpecs.length + WRAP_HEADROOM,
+  termRows > 0 ? Math.max(1, Math.floor(termRows / 3)) : Infinity, // ≤ a third of the terminal
+);
+{
+  const specIdx = (label) => sectionSpecs.findIndex((s) => s[0] === label);
+  let total = sections.reduce((n, s) => n + s.length, 0);
+  // Pass 1 — squeeze: re-pack the tallest wrapped section one row shorter until we fit (or
+  // every section is down to a single row).
+  while (total > maxContent) {
+    let idx = -1;
+    let tallest = 1;
+    for (const label of SQUEEZE_ORDER) {
+      const i = specIdx(label);
+      if (i >= 0 && sections[i].length > tallest) {
+        tallest = sections[i].length;
+        idx = i;
+      }
+    }
+    if (idx < 0) break; // nothing multi-row left — pass 2 drops whole sections
+    const [label, segs, lead, leadWidth, preferDetail] = sectionSpecs[idx];
+    sections[idx] = packSection(label, segs, lead ?? "", leadWidth ?? null, preferDetail ?? false, tallest - 1);
+    total = sections.reduce((n, s) => n + s.length, 0);
+  }
+  // Pass 2 — drop: on terminals too short for one row per section, whole sections vanish in
+  // DROP_ORDER until the dashboard fits.
+  for (const label of DROP_ORDER) {
+    if (total <= maxContent) break;
+    const i = specIdx(label);
+    if (i >= 0 && sections[i].length > 0) {
+      total -= sections[i].length;
+      sections[i] = [];
+    }
+  }
+}
+
 const blank = cp(0x2800); // U+2800: non-whitespace, so CC's trailing-blank-row strip preserves it
 const contentRows = sections.flat().filter(Boolean); // the non-empty section lines, in order
-const HEIGHT = sections.length; // one row-slot per section — the fixed line budget
+// Final height = max(content, slot floor, this session's high-water mark at this geometry) —
+// see SHRINK above. The floor keeps /clear from dropping rows; the mark keeps a wrap-then-unwrap
+// cycle from dropping them.
+const geom = `${process.env.COLUMNS || ""}x${process.env.LINES || ""}`;
+const hwmFile =
+  (process.env.TEMP || process.env.TMP || "/tmp").replace(/\\/g, "/") + "/sl-hwm-" + hashPath(sid || "nosid") + ".json";
+const prevHwm = readJson(hwmFile);
+const floor = Math.min(sectionSpecs.length, maxContent);
+const carried = prevHwm && prevHwm.geom === geom ? Math.min(prevHwm.h || 0, maxContent) : 0;
+const HEIGHT = Math.max(contentRows.length, floor, carried);
+try {
+  if (!prevHwm || prevHwm.geom !== geom || prevHwm.h !== HEIGHT)
+    require("node:fs").writeFileSync(hwmFile, JSON.stringify({ geom, h: HEIGHT }));
+} catch {}
 // Content packs to the TOP; blank slots backfill to HEIGHT so the gap rides at the BOTTOM (above the
 // prompt) instead of opening holes mid-dashboard. After /clear you briefly see that gap where Turn +
 // Activity were; it heals as soon as you resume work and those rows return — height never changes.
