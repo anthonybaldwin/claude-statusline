@@ -83,8 +83,9 @@ const gIn = cp(0xf090); // nf-fa-sign_in (input tokens)
 const gOut = cp(0xf08b); // nf-fa-sign_out (output tokens)
 const gWrite = cp(0xf0ee); // nf-fa-cloud_upload (cache write)
 const gRead = cp(0xf0ed); // nf-fa-cloud_download (cache read)
+const gPromptCache = cp(0xf00e8); // nf-md-cached — session prompt-cache health (Turn row); codepoint verified against glyphnames.json
 // Config-row icons — ALL Material Design (nf-md-*); Font Awesome renders blank in this font.
-const gCfgDoc = cp(0xf0219); // nf-md-file_document — CLAUDE.md/AGENTS.md (paired with a C/A letter)
+const gCfgDoc = cp(0xf0219); // nf-md-file_document — instruction files (CLAUDE.md + natively-loaded AGENTS.md)
 const gCfgAgents = cp(0xf167a); // nf-md-robot_outline
 const gCfgCmds = cp(0xf018d); // nf-md-console
 const gCfgSkills = cp(0xf0068); // nf-md-auto_fix (magic wand)
@@ -173,6 +174,13 @@ function formatResetTime(ts, fmt = "HH:mm") {
     const hm = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
     const wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][d.getDay()];
     if (fmt === "ddd HH:mm") return `${wd} ${hm}`;
+    // "date": for periods LONGER than a week (spend-limit billing periods), where a bare weekday is
+    // ambiguous — "Sep 30" while the reset is ≥6 days out, then the usual weekday + time.
+    if (fmt === "date") {
+      if (d.getTime() - Date.now() < 6 * 24 * 3600e3) return `${wd} ${hm}`;
+      const mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][d.getMonth()];
+      return `${mon} ${d.getDate()}`;
+    }
     // "auto": time only, but prepend the weekday when the reset falls on a DIFFERENT calendar
     // day than now (e.g. a 5h window that rolls past midnight → "Tue 01:00" instead of "01:00").
     if (fmt === "auto") {
@@ -231,6 +239,19 @@ function formatCost(cost) {
 function truncate(value, maxLen) {
   const s = String(value || "").replace(/\s+/g, " ").trim();
   return s.length <= maxLen ? s : `${s.slice(0, Math.max(0, maxLen - 3))}...`;
+}
+
+// Dotted-numeric version compare ("2.1.277" ≥ "2.1.260"). Unknown/absent version → false, so a
+// version-gated behavior stays OFF when we can't tell which Claude Code is feeding us.
+function versionAtLeast(version, min) {
+  const parse = (v) => String(v || "").split(".").map((n) => parseInt(n, 10));
+  const a = parse(version);
+  const b = parse(min);
+  if (!a.length || a.some((n) => !Number.isFinite(n))) return false;
+  for (let i = 0; i < b.length; i++) {
+    if ((a[i] || 0) !== b[i]) return (a[i] || 0) > b[i];
+  }
+  return true;
 }
 
 function percent(current, total) {
@@ -451,7 +472,13 @@ function readRegManaged() {
 function detectManaged() {
   const dir = managedDir();
   const settings = readRegManaged() || readJson(join(dir, "managed-settings.json")) || null;
-  const mcpServers = { ...(readJson(join(dir, "managed-mcp.json"))?.mcpServers || {}), ...(settings?.mcpServers || {}) };
+  // `managedMcpServers` (managed-settings key, CC v2.1.259+): org-provided REMOTE servers layered
+  // alongside the user's own. http/sse only — CC drops any entry without an https:// `url` (a
+  // `command` entry is skipped), so mirror that filter or a rejected entry would inflate the count.
+  const provided = Object.fromEntries(
+    Object.entries(settings?.managedMcpServers || {}).filter(([, v]) => /^https:\/\//i.test(String(v?.url || "")) && !v?.command),
+  );
+  const mcpServers = { ...(readJson(join(dir, "managed-mcp.json"))?.mcpServers || {}), ...(settings?.mcpServers || {}), ...provided };
   const claudeMd = existsSync(join(dir, "CLAUDE.md")) || !!settings?.claudeMd;
   return { dir, settings, mcpServers, claudeMd };
 }
@@ -514,7 +541,7 @@ function mcpBreakdown(projectDir, currentDir, managed, state) {
   // precedence Local > Project > User: count each server once, at its highest-precedence source.
   for (const k of local) { project.delete(k); user.delete(k); }
   for (const k of project) user.delete(k);
-  const m = Object.keys(managed?.mcpServers || {}).length; // managed-mcp.json + managed settings mcpServers
+  const m = Object.keys(managed?.mcpServers || {}).length; // managed-mcp.json + managed settings mcpServers/managedMcpServers
   return { m, u: user.size, p: project.size, l: local.size };
 }
 
@@ -886,7 +913,7 @@ function memoryDir(transcriptPath, mainRoot, launchDir, scopeSettings) {
 }
 
 // Each entry is a per-scope {m,u,p,l} breakdown (see the scope helpers above for what each means).
-function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir, transcriptPath) {
+function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir, transcriptPath, ccVersion) {
   if (!projectDir) return null;
   const managed = detectManaged();
   // PROJECT/LOCAL scope reads from `projDir` (the project root). If that root IS the user's home
@@ -914,17 +941,54 @@ function configCounts(projectDir, addedDirs, currentDir, mainRoot, launchDir, tr
     if (out === null) return 0;
     return out.split("\n").filter((l) => l.trim() !== "").length;
   };
-  // CLAUDE.md memory files, counted per scope (each is a distinct file that loads into context):
+  // Instruction files (CLAUDE.md + natively-loaded AGENTS.md), counted per scope — each is a
+  // distinct file that loads into context:
   // m = managed (<managedDir>/CLAUDE.md or the `claudeMd` key in managed settings/registry) ·
   // u = user (~/.claude/CLAUDE.md) · p = repo recursive committed count · l = CLAUDE.local.md.
-  // Summed + shown like every other widget. AGENTS.md is NOT counted: Claude Code reads CLAUDE.md
-  // only — AGENTS.md loads solely if a CLAUDE.md @-imports it.
-  const claudeMd = () => ({
-    m: managed.claudeMd ? 1 : 0,
-    u: existsSync(join(HOME, ".claude", "CLAUDE.md")) ? 1 : 0,
-    p: docCount("CLAUDE.md"),
-    l: projDir && existsSync(join(projDir, "CLAUDE.local.md")) ? 1 : 0,
-  });
+  // AGENTS.md: CC v2.1.277+ reads it NATIVELY (before that it loaded only via a CLAUDE.md @-import,
+  // which we can't see and never counted). Which files load is the built-in agents-md plugin's
+  // `instructionFiles` option — read from managed > user settings ONLY (CC ignores it in project/
+  // local files):
+  //   claude-md-or-agents-md (default) — AGENTS.md ONLY when no CLAUDE.md, .claude/CLAUDE.md or
+  //       CLAUDE.local.md sits in the project root or any dir above it (~/.claude/CLAUDE.md and
+  //       the managed one don't count for that check, and keep loading alongside)
+  //   claude-md-and-agents-md — both together · claude-md — never AGENTS.md
+  //   managed-only — only the managed CLAUDE.md (+ auto memory); u/p/l all drop out
+  // Off entirely under disableAllHooks / allowManagedHooksOnly (it's a plugin). NOT detectable
+  // from here: the feature-flag gate (Bedrock/Vertex/telemetry-off sessions) and the first session
+  // after an upgrade — there the count can read one high until a CLAUDE.md exists.
+  const claudeMd = () => {
+    const userSettings = readJson(join(HOME, ".claude", "settings.json"));
+    const pickU = (key) => managed?.settings?.[key] ?? userSettings?.[key];
+    const agentsNative =
+      versionAtLeast(ccVersion, "2.1.277") &&
+      pickU("disableAllHooks") !== true &&
+      managed?.settings?.allowManagedHooksOnly !== true;
+    const optOf = (st) => st?.pluginConfigs?.["agents-md@builtin"]?.options?.instructionFiles;
+    const mode = agentsNative ? optOf(managed?.settings) || optOf(userSettings) || "claude-md-or-agents-md" : "claude-md";
+    const c = {
+      m: managed.claudeMd ? 1 : 0,
+      u: existsSync(join(HOME, ".claude", "CLAUDE.md")) ? 1 : 0,
+      p: docCount("CLAUDE.md"),
+      l: projDir && existsSync(join(projDir, "CLAUDE.local.md")) ? 1 : 0,
+    };
+    if (mode === "managed-only") return { ...c, u: 0, p: 0, l: 0 };
+    if (mode === "claude-md-and-agents-md") c.p += docCount("AGENTS.md");
+    else if (mode === "claude-md-or-agents-md" && projDir) {
+      // Walk root-ward from the project root looking for any CLAUDE.md that suppresses AGENTS.md.
+      let shadowed = false;
+      for (let d = projDir, prev = ""; d && d !== prev; prev = d, d = dirname(d)) {
+        const isHome = norm(d) === norm(HOME); // ~/.claude/CLAUDE.md is USER scope — doesn't count
+        if (
+          existsSync(join(d, "CLAUDE.md")) ||
+          existsSync(join(d, "CLAUDE.local.md")) ||
+          (!isHome && existsSync(join(d, ".claude", "CLAUDE.md")))
+        ) { shadowed = true; break; }
+      }
+      if (!shadowed) c.p += docCount("AGENTS.md");
+    }
+    return c;
+  };
   // Build the EXECUTABLE project/local-bearing breakdowns, then zero their project/local slots when
   // untrusted (they don't load). CONTENT items (rules, styles, CLAUDE.md) are built un-gated below.
   const hooks = withX(hooksBreakdown(projDir, managed), plug.hooks);
@@ -1510,9 +1574,10 @@ function rlBlock(node, label, fmt, windowMs) {
 }
 
 // Per-model weekly limits + usage-credit spend live only behind the OAuth usage API (not in
-// stdin — verified against the v2.1.226 payload builder: rate_limits carries ONLY five_hour +
-// seven_day). Read the OAuth token and fetch it, but cache the result with a TTL so we hit the
-// API at most once per window.
+// stdin — verified against the v2.1.226 payload builder, and still true per the v2.1.278 docs:
+// rate_limits carries ONLY five_hour + seven_day, plus the gateway-only spend_limit). Read the
+// OAuth token and fetch it, but cache the result with a TTL so we hit the API at most once per
+// window.
 function readOauthToken() {
   try {
     if (process.platform === "darwin") {
@@ -1687,14 +1752,24 @@ const elapsedMs = typeof data.cost?.total_duration_ms === "number" && data.cost.
     : 0;
 const elapsedMinutes = elapsedMs / 60000;
 
-// rate_limits stdin only exposes five_hour + seven_day (verified in the v2.1.226 payload builder;
-// seven_day covers all models). Per-model scoped weeklies + usage credits are API-only (below).
+// rate_limits stdin exposes the subscription windows five_hour + seven_day (seven_day covers all
+// models; verified in the v2.1.226 payload builder) and, since v2.1.251, `spend_limit` for users
+// behind a Claude apps gateway. Per-model scoped weeklies + usage credits are API-only (below).
+// Each window may be independently absent — CC drops one once its resets_at passes.
 const rl5 = rlBlock(data.rate_limits?.five_hour, "5h", "auto", 5 * 3600e3); // day abbrev only if it rolls to next day
 const rl7 = rlBlock(data.rate_limits?.seven_day, "7d", "ddd HH:mm", 7 * 24 * 3600e3);
+// SPEND LIMIT (gateway): % of the spend cap that applies to you + when its period resets. The
+// period LENGTH isn't in the payload, so there's no budget line to pace against (windowMs 0 → no
+// pace suffix), and the percentage runs PAST 100 once over the cap — shown verbatim in red; the
+// bar clamps itself. Distinct from `Cr` below, which is claude.ai usage-credit overage in dollars.
+const rlSp = rlBlock(data.rate_limits?.spend_limit, "Sp", "date", 0);
 // The extra gauges are API-only — only bother for Pro/Max sessions (rate_limits present in stdin).
+// A gateway session carries spend_limit ALONE and has no claude.ai OAuth usage to read — skip it
+// (but an EMPTY rate_limits still counts as Pro/Max: CC drops both windows right after they reset).
 // Serve the cached response INSTANTLY; refresh out-of-band when stale (never await the network here).
 let usageData = null;
-if (data.rate_limits) {
+const rlIn = data.rate_limits;
+if (rlIn && !(rlIn.spend_limit && !rlIn.five_hour && !rlIn.seven_day)) {
   const cached = readUsageCache();
   usageData = cached.data;
   if (!cached.fresh) spawnUsageRefresh();
@@ -1743,7 +1818,7 @@ let crBlock = null;
     crBlock = [p, full, compact];
   }
 }
-const rlBlocks = [rl5, rl7, ...scopedBlocks, crBlock].filter(Boolean);
+const rlBlocks = [rl5, rl7, ...scopedBlocks, rlSp, crBlock].filter(Boolean);
 
 let gitStr = "no branch";
 let repoRoot = currentDir; // working-tree root (the worktree's OWN dir when in a linked worktree)
@@ -1875,6 +1950,47 @@ if (usage) {
   if (cacheWrite > 0) tokenParts.push(`${YELLOW}${gWrite}${RESET} ${VAL}${formatTokens(cacheWrite)}${RESET}`);
   if (cacheRead > 0) tokenParts.push(`${GREEN}${gRead}${RESET} ${VAL}${formatTokens(cacheRead)}${RESET}`);
   if (tokenParts.length) turnSegs.push(tokenParts.join(` ${SOFT}|${RESET} `));
+}
+
+// Prompt-cache health for the MAIN conversation (stdin `prompt_cache`, CC v2.1.251+; absent until
+// the first API response, subagent requests excluded). Sits on Turn because it explains the W/R
+// split beside it: R dominating = cache working, a fat W = something re-cached. Three terse facts:
+//   hit%   — cache reads ÷ ALL input tokens this session (null while counts are zero). Green ≥80,
+//            yellow <50: a long session stuck low is paying full price for its own history.
+//   state  — warm + time left on the TTL (expires_at; CC itself re-runs us at expiry, so this flips
+//            to cold on time without refreshInterval), or cold + what the next request re-caches
+//            (recache_tokens_if_cold) — the cost of having walked away.
+//   misses — requests that re-processed content the cache already held, with the likely cause of
+//            the LAST one (last_miss_cause, v2.1.260+) in the wide form only. expected_rebuilds
+//            (post-compaction) are deliberately not counted — those are CC working as designed.
+// caching_observed:false = caching off or a gateway that doesn't report it → nothing worth showing.
+const pc = data.prompt_cache;
+if (pc && typeof pc === "object" && pc.caching_observed !== false) {
+  const bits = [];
+  const hr = Number(pc.hit_ratio);
+  if (pc.hit_ratio != null && Number.isFinite(hr)) {
+    const hp = Math.round(hr * 100);
+    bits.push(`${hp >= 80 ? GREEN : hp < 50 ? YELLOW : VAL}${hp}%${RESET}`);
+  }
+  if (pc.warm === true) {
+    const left = toEpochMs(pc.expires_at) - Date.now();
+    bits.push(`${VAL}warm${RESET}${left > 0 ? ` ${SOFT}${formatCountdown(left)}${RESET}` : ""}`);
+  } else if (pc.warm === false) {
+    const recache = Number(pc.recache_tokens_if_cold) || 0;
+    bits.push(`${DIM}cold${RESET}${recache > 0 ? ` ${DIM}~${formatTokens(recache)}${RESET}` : ""}`);
+  }
+  if (bits.length) {
+    const head = `${c256(45)}${gPromptCache}${RESET} ${bits.join(" ")}`;
+    const misses = Number(pc.misses) || 0;
+    if (misses > 0) {
+      const miss = ` ${YELLOW}${misses} miss${RESET}`;
+      const causes = Array.isArray(pc.last_miss_cause?.causes) ? pc.last_miss_cause.causes.filter((c) => typeof c === "string") : [];
+      const why = causes.length ? ` ${DIM}(${truncate(causes.join(",").replace(/_/g, " "), 28)})${RESET}` : "";
+      turnSegs.push(why ? { alts: [head + miss + why, head + miss] } : head + miss);
+    } else {
+      turnSegs.push(head);
+    }
+  }
 }
 
 const stateSegs = [];
@@ -2086,7 +2202,12 @@ if (inRepo) {
     else if (rs.includes("change")) { prColor = RED; mark = ` ${RED}${gX}${RESET}`; }
     else if (rs.includes("draft")) { prColor = DIM; mark = ` ${DIM}draft${RESET}`; }
     else if (rs.includes("pending") || rs.includes("review") || rs.includes("required")) { prColor = YELLOW; mark = ` ${YELLOW}●${RESET}`; }
-    const label = prData.number != null ? `#${prData.number}` : "PR";
+    // GitLab (CC v2.1.234+): on a GitLab remote with an authed `glab`, CC fills `pr` from the
+    // branch's open MERGE REQUEST and sets `kind: "mr"` (absent for GitHub PRs). GitLab writes MRs
+    // as !N — match CC's own footer badge. review_state is already mapped onto the PR enum upstream
+    // (mergeable → approved, other open → pending, draft → draft), so the coloring above holds.
+    const isMr = String(prData.kind || "").toLowerCase() === "mr";
+    const label = prData.number != null ? `${isMr ? "!" : "#"}${prData.number}` : isMr ? "MR" : "PR";
     const extra = prList.length > 1 ? ` ${SOFT}+${prList.length - 1}${RESET}` : "";
     locSegs.push(`${MAGENTA}${gPR}${RESET} ${prColor}${label}${RESET}${mark}${extra}`);
   }
@@ -2147,8 +2268,10 @@ const counts = displayRoot
       ],
       // extraSig: added-dir count + the auto-memory kill switch — the env var isn't a watchable
       // file, so it must join the signature or a toggle would keep serving the cached counts.
-      addedDirCount + "|" + (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY || ""),
-      () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot, launchDir, data.transcript_path)
+      // data.version joins too: native AGENTS.md loading is version-gated (v2.1.277+), so a CC
+      // upgrade must not keep serving counts computed under the old rules.
+      addedDirCount + "|" + (process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY || "") + "|" + (data.version || ""),
+      () => configCounts(displayRoot, data.workspace?.added_dirs, currentDir, mainRoot, launchDir, data.transcript_path, data.version)
     )
   : null;
 // config gets its OWN row (own section). Numeric counts (no ✓/✗). Repo-relative docs
@@ -2184,8 +2307,9 @@ if (counts) {
   // Every config widget renders its icon + count (0 included) so an empty category shows at a
   // glance; the breakdown parens appear only once total>0 (an all-0/"-" breakdown is just noise).
   const show = (head, c, opts) => configSegs.push(seg(head, c, opts));
-  // CLAUDE.md — doc icon, NO letter (AGENTS.md isn't loaded natively by CC, so there's nothing to
-  // disambiguate from). Counted like every other widget now: total across the scopes it CAN have,
+  // Instruction files — doc icon, NO letter: CLAUDE.md plus any AGENTS.md CC loads natively
+  // (v2.1.277+, see configCounts) fold into ONE count — both are "project instructions in context",
+  // and which flavor a repo uses isn't worth a second widget. Counted like every other widget: total across the scopes it CAN have,
   // breakdown showing where they live. caps "mupl" — managed/user/project/local; plugins don't
   // provide CLAUDE.md → "-".
   show(gCfgDoc, counts.claude, { color: c256(36), breakdown: true, caps: "mupl" }); // teal

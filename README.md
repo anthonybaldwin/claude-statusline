@@ -29,19 +29,26 @@ up, never down, so Claude Code's repaint never leaves ghost rows behind.
   0–100% scale. Each windowed gauge carries a signed pace balance vs the even-consumption budget
   line: `+N%` = quota in hand (green), `-N%` = burning ahead of pace (yellow). A `Cr` gauge
   (monthly usage-credit spend, `$used/$limit`) appears only once credits actually start being
-  consumed.
+  consumed. Behind a [Claude apps gateway](https://code.claude.com/docs/en/claude-apps-gateway-spend-limits),
+  an `Sp` gauge shows your spend-limit usage (`rate_limits.spend_limit`, Claude Code ≥ 2.1.251) —
+  it keeps counting past 100% once you're over the cap, with the period's reset date.
 - **Usage** — total session cost, `$/h` burn rate, throughput (tok/s), API time, and wall-clock.
-- **Turn** — the last call's token makeup: input / output / cache-write / cache-read.
+- **Turn** — the last call's token makeup: input / output / cache-write / cache-read; then the
+  session's prompt-cache health (`prompt_cache`, Claude Code ≥ 2.1.251): hit ratio, `warm` with
+  time left on the TTL or `cold` with what the next request will re-cache, and a yellow miss
+  count with the likely cause of the last miss (e.g. `tools changed`) when there's room.
 - **Activity** — active slash command, todo progress, last tool call, sub-agents (each running
   agent with its own task count, plus a green ✔ tally of completed ones), and the session's edit
   volume (+added / −removed lines).
 - **Repo** — *(only inside a git repo)* project name, origin-remote identity (host-branded
   GitHub/GitLab/Bitbucket badge + `owner`, or `owner/name` when the remote name differs from the
   folder), worktree, branch with ahead/behind and staged/modified/untracked/conflict counts, the
-  current branch's open PR (colored by review state), and the latest `v*` tag with commits-since.
+  current branch's open PR — or GitLab merge request, shown as `!N` — colored by review state,
+  and the latest `v*` tag with commits-since.
 - **Config** — what's actually loaded, each broken down by Claude Code's real config scopes
   **(managed / user / project / local / plugin)**, de-duped by precedence and gated on workspace
-  trust: CLAUDE.md memory, auto-memory files (this project's `~/.claude/projects/<slug>/memory/`),
+  trust: instruction files (CLAUDE.md, plus AGENTS.md wherever Claude Code ≥ 2.1.277 loads it
+  natively — honoring the *Project instructions* setting), auto-memory files (this project's `~/.claude/projects/<slug>/memory/`),
   agents, commands, skills (incl. output-styles), workflows, routines, rules, MCP servers,
   claude.ai connectors, claude-in-chrome, hooks, plugins, themes (plugin or your own
   `~/.claude/themes/`), and session-added dirs.
